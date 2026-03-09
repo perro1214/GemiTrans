@@ -8,7 +8,8 @@
     "storage",
     "scripting",
     "tabs",
-    "contextMenus"
+    "contextMenus",
+    "webNavigation"
   ],
   "host_permissions": [
     "https://generativelanguage.googleapis.com/*"
@@ -43,6 +44,9 @@
     {
       "matches": [
         "<all_urls>"
+      ],
+      "js": [
+        "content/content.js"
       ],
       "css": [
         "styles/content.css"

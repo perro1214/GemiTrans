@@ -7,37 +7,37 @@
 
 /* CSS Custom Properties */
 :root {
-  --bg-primary: #0f0f1a;
-  --bg-secondary: #1a1a2e;
-  --bg-tertiary: #16213e;
-  --bg-card: rgba(26, 26, 46, 0.8);
-  --bg-input: rgba(22, 33, 62, 0.6);
+  --bg-primary: #f7fafd;
+  --bg-secondary: #e2e7e7;
+  --bg-tertiary: #d1d8d8;
+  --bg-card: #ffffff;
+  --bg-input: #ffffff;
 
-  --text-primary: #e0e0ff;
-  --text-secondary: #a0a0c0;
-  --text-muted: #6a6a8a;
+  --text-primary: #003672;
+  --text-secondary: #5c6f8b;
+  --text-muted: #8aa0bb;
 
-  --accent-primary: #6c63ff;
-  --accent-secondary: #a855f7;
-  --accent-gradient: linear-gradient(135deg, #6c63ff 0%, #a855f7 50%, #ec4899 100%);
-  --accent-glow: rgba(108, 99, 255, 0.3);
+  --accent-primary: #003672;
+  --accent-secondary: #5c6f8b;
+  --accent-gradient: linear-gradient(135deg, #003672 0%, #5c6f8b 100%);
+  --accent-glow: rgba(0, 54, 114, 0.15);
 
-  --warning: #f59e0b;
-  --warning-bg: rgba(245, 158, 11, 0.1);
-  --success: #10b981;
-  --success-bg: rgba(16, 185, 129, 0.1);
-  --error: #ef4444;
-  --error-bg: rgba(239, 68, 68, 0.1);
+  --warning: #d97706;
+  --warning-bg: rgba(245, 158, 11, 0.15);
+  --success: #059669;
+  --success-bg: rgba(16, 185, 129, 0.15);
+  --error: #dc2626;
+  --error-bg: rgba(239, 68, 68, 0.15);
 
-  --border-color: rgba(108, 99, 255, 0.15);
-  --border-hover: rgba(108, 99, 255, 0.35);
+  --border-color: #d1d8d8;
+  --border-hover: #5c6f8b;
 
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
 
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 2px 8px rgba(0, 54, 114, 0.08);
+  --shadow-md: 0 4px 16px rgba(0, 54, 114, 0.12);
   --shadow-glow: 0 0 20px var(--accent-glow);
 
   --transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
@@ -73,8 +73,8 @@ body {
   left: -50%;
   width: 200%;
   height: 200%;
-  background: radial-gradient(ellipse at 30% 20%, rgba(108, 99, 255, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 70% 80%, rgba(168, 85, 247, 0.05) 0%, transparent 50%);
+  background: radial-gradient(ellipse at 30% 20%, rgba(0, 54, 114, 0.05) 0%, transparent 50%),
+    radial-gradient(ellipse at 70% 80%, rgba(92, 111, 139, 0.04) 0%, transparent 50%);
   pointer-events: none;
   z-index: 0;
 }
@@ -84,7 +84,7 @@ body {
   padding: 20px 20px 12px;
   position: relative;
   z-index: 1;
-  background: linear-gradient(180deg, rgba(108, 99, 255, 0.08) 0%, transparent 100%);
+  background: linear-gradient(180deg, rgba(0, 54, 114, 0.06) 0%, transparent 100%);
   border-bottom: 1px solid var(--border-color);
 }
 
@@ -194,7 +194,7 @@ body {
 
 .btn-icon:hover {
   border-color: var(--accent-primary);
-  background: rgba(108, 99, 255, 0.1);
+  background: rgba(0, 54, 114, 0.15);
 }
 
 /* Key Status */
@@ -324,7 +324,7 @@ body {
 
 .btn-secondary:hover {
   border-color: var(--accent-primary);
-  background: rgba(108, 99, 255, 0.08);
+  background: rgba(0, 54, 114, 0.05);
 }
 
 .btn-warning {
@@ -396,7 +396,7 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+  background: linear-gradient(90deg, transparent, rgba(0, 54, 114, 0.15), transparent);
   animation: shimmer 1.5s infinite;
 }
 
@@ -500,7 +500,7 @@ body {
   display: inline-block;
   width: 16px;
   height: 16px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
+  border: 2px solid rgba(0, 54, 114, 0.15);
   border-top-color: white;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;

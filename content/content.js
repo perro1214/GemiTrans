@@ -30,9 +30,14 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         isTranslating: false,
         isTranslated: false,
         isCancelled: false,
-        originalTexts: new Map(), // element -> originalText
+        originalTexts: new Map(), // node -> originalText
         translatedElements: new Set()
     };
+
+    // MutationObserver 関連（動的コンテンツ監視）
+    let mutationObserver = null;
+    let mutationDebounceTimer = null;
+    const pendingMutationNodes = new Map(); // node -> text のバッファ（重複防止）
 
     // 翻訳対象外のタグ
     const SKIP_TAGS = new Set([
@@ -44,6 +49,40 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
     // 最小テキスト長（これ以下は翻訳しない）
     const MIN_TEXT_LENGTH = 2;
+
+    /**
+     * ページの言語を検出する
+     * @returns {'ja' | 'other' | 'unknown'}
+     */
+    function detectPageLanguage() {
+        // HTML lang属性を最優先で確認
+        const lang = document.documentElement.lang?.toLowerCase() || '';
+        if (lang.startsWith('ja')) return 'ja';
+
+        // メタタグの content-language を確認
+        const metaLang = document.querySelector('meta[http-equiv="content-language"]')?.content?.toLowerCase() || '';
+        if (metaLang.startsWith('ja')) return 'ja';
+
+        // ページ冒頭テキストで日本語文字（ひらがな・カタカナ・漢字）の比率を計算
+        const sampleText = (document.body?.innerText || '').slice(0, 500);
+        if (!sampleText) return 'unknown';
+
+        const japaneseChars = (sampleText.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]/g) || []).length;
+        const ratio = japaneseChars / sampleText.length;
+
+        // 10%以上が日本語文字であれば日本語ページと判定
+        return ratio > 0.1 ? 'ja' : 'other';
+    }
+
+    /**
+     * 翻訳先言語が日本語かどうか判定する
+     * @param {string} targetLang
+     * @returns {boolean}
+     */
+    function isTargetJapanese(targetLang) {
+        const jaNames = ['日本語', 'Japanese', 'japanese', 'ja', 'JP'];
+        return jaNames.includes(targetLang);
+    }
 
     // ステータスバッジ
     let statusBadge = null;
@@ -146,6 +185,21 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
     async function translatePage(targetLang, batchMaxChars = 3000, onProgress) {
         if (state.isTranslating) return;
 
+        // 既翻訳状態の場合はリセット（SPA遷移後の再翻訳に対応）
+        if (state.isTranslated) {
+            stopMutationObserver();
+            restoreOriginal();
+        }
+
+        // 翻訳先が日本語の場合、日本語ページはスキップしてAPIリクエストを節約
+        if (isTargetJapanese(targetLang)) {
+            const pageLang = detectPageLanguage();
+            if (pageLang === 'ja') {
+                contentLogger.info('日本語ページのため翻訳をスキップします（APIリクエスト節約）');
+                return;
+            }
+        }
+
         state.isTranslating = true;
         state.isCancelled = false;
 
@@ -227,6 +281,9 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             showStatusBadge('✅ 翻訳完了', 'done');
             setTimeout(() => hideStatusBadge(), 3000);
             contentLogger.info(`翻訳完了: ${total}件のテキストを翻訳しました`);
+
+            // 翻訳完了後に動的コンテンツを監視開始（Ajax・無限スクロール対応）
+            startMutationObserver(targetLang, batchMaxChars);
         } catch (error) {
             showStatusBadge('❌ エラー', 'error');
             setTimeout(() => hideStatusBadge(), 3000);
@@ -251,6 +308,8 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
      * 翻訳を元に戻す
      */
     function restoreOriginal() {
+        stopMutationObserver(); // 動的コンテンツ監視も停止
+
         for (const [node, originalText] of state.originalTexts) {
             try {
                 node.textContent = originalText;
@@ -272,6 +331,169 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         state.translatedElements.clear();
         state.isTranslated = false;
         hideStatusBadge();
+    }
+
+    /**
+     * MutationObserver でテキストノードを受け入れるか判定する
+     * @param {Text} node
+     * @returns {boolean}
+     */
+    function acceptMutationNode(node) {
+        if (!node.parentElement) return false;
+        if (SKIP_TAGS.has(node.parentElement.tagName)) return false;
+        if (node.parentElement.closest('[contenteditable="true"]')) return false;
+        if (node.parentElement.classList.contains('llm-translate-tooltip')) return false;
+        if (node.parentElement.id === 'llm-translate-badge') return false;
+        if (state.originalTexts.has(node)) return false; // 既翻訳ノードはスキップ
+
+        const text = node.textContent.trim();
+        return text.length >= MIN_TEXT_LENGTH;
+    }
+
+    /**
+     * 追加された DOM ノードからテキストノードを収集して pendingMutationNodes に積む
+     * @param {Node} rootNode
+     */
+    function collectFromAddedNode(rootNode) {
+        // 翻訳バッジや独自要素は除外
+        if (rootNode.nodeType === Node.ELEMENT_NODE) {
+            if (rootNode.id === 'llm-translate-badge') return;
+            if (rootNode.classList.contains('llm-translate-tooltip')) return;
+        }
+
+        if (rootNode.nodeType === Node.TEXT_NODE) {
+            if (acceptMutationNode(rootNode)) {
+                pendingMutationNodes.set(rootNode, rootNode.textContent.trim());
+            }
+            return;
+        }
+
+        if (rootNode.nodeType !== Node.ELEMENT_NODE) return;
+
+        const walker = document.createTreeWalker(
+            rootNode,
+            NodeFilter.SHOW_TEXT,
+            { acceptNode: (node) => acceptMutationNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT }
+        );
+
+        let node;
+        while ((node = walker.nextNode())) {
+            pendingMutationNodes.set(node, node.textContent.trim());
+        }
+    }
+
+    /**
+     * 動的に追加されたコンテンツを翻訳する（デバウンス後に実行）
+     * @param {string} targetLang
+     * @param {number} batchMaxChars
+     */
+    async function flushPendingMutations(targetLang, batchMaxChars) {
+        if (pendingMutationNodes.size === 0) return;
+
+        // 接続中かつ未翻訳のノードのみに絞る
+        const validItems = [];
+        for (const [node, text] of pendingMutationNodes) {
+            if (node.isConnected && !state.originalTexts.has(node)) {
+                validItems.push({ node, text });
+            }
+        }
+        pendingMutationNodes.clear();
+
+        if (validItems.length === 0) return;
+
+        contentLogger.info(`動的コンテンツ翻訳: ${validItems.length}件`);
+
+        const maxChars = batchMaxChars === 0 ? Infinity : batchMaxChars;
+        const batches = chunkByChars(validItems, maxChars);
+
+        for (const batch of batches) {
+            if (state.isCancelled) break;
+
+            const texts = batch.map(item => item.text);
+            try {
+                const response = await chrome.runtime.sendMessage({
+                    type: 'TRANSLATE',
+                    texts,
+                    targetLang
+                });
+
+                if (!response.success) {
+                    contentLogger.error(`動的コンテンツバッチ翻訳失敗: ${response.error}`);
+                    continue;
+                }
+
+                const { translatedTexts } = response;
+                for (let i = 0; i < batch.length; i++) {
+                    const { node } = batch[i];
+                    if (!node.isConnected) continue; // DOM から切り離されていたらスキップ
+
+                    const originalText = node.textContent;
+                    const translated = translatedTexts[i];
+
+                    if (translated && translated !== originalText) {
+                        state.originalTexts.set(node, originalText);
+                        node.textContent = translated;
+
+                        const parent = node.parentElement;
+                        if (parent) {
+                            parent.classList.add('llm-translated');
+                            parent.setAttribute('data-original-text', originalText);
+                            state.translatedElements.add(parent);
+                        }
+                    }
+                }
+            } catch (e) {
+                contentLogger.error(`動的コンテンツ翻訳エラー: ${e.message}`);
+            }
+        }
+    }
+
+    /**
+     * MutationObserver を起動して動的コンテンツを監視する
+     * @param {string} targetLang
+     * @param {number} batchMaxChars
+     */
+    function startMutationObserver(targetLang, batchMaxChars) {
+        if (mutationObserver) return; // 既に起動中
+
+        mutationObserver = new MutationObserver((mutations) => {
+            let hasNewNodes = false;
+
+            for (const mutation of mutations) {
+                for (const addedNode of mutation.addedNodes) {
+                    collectFromAddedNode(addedNode);
+                    if (pendingMutationNodes.size > 0) hasNewNodes = true;
+                }
+            }
+
+            if (!hasNewNodes) return;
+
+            // 連続する DOM 変更をまとめて処理（デバウンス 500ms）
+            clearTimeout(mutationDebounceTimer);
+            mutationDebounceTimer = setTimeout(() => {
+                flushPendingMutations(targetLang, batchMaxChars);
+            }, 500);
+        });
+
+        mutationObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        contentLogger.info('MutationObserver 起動: 動的コンテンツ監視開始');
+    }
+
+    /**
+     * MutationObserver を停止する
+     */
+    function stopMutationObserver() {
+        if (mutationObserver) {
+            mutationObserver.disconnect();
+            mutationObserver = null;
+            contentLogger.info('MutationObserver 停止');
+        }
+        clearTimeout(mutationDebounceTimer);
+        pendingMutationNodes.clear();
     }
 
     /**

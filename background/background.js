@@ -248,6 +248,38 @@ async function handleClearLogs(sendResponse) {
 }
 
 /**
+ * SPA のページ遷移（history.pushState）を検知して自動翻訳
+ * React / Vue / Angular などのシングルページアプリケーション対応
+ */
+chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
+    // メインフレームのみ処理（iframe 内の遷移は無視）
+    if (details.frameId !== 0) return;
+
+    try {
+        const settings = await chrome.storage.sync.get(['apiKey', 'targetLang', 'autoTranslate', 'batchMaxChars']);
+        if (!settings.autoTranslate || !settings.apiKey) return;
+
+        const targetLang = settings.targetLang || '日本語';
+        const batchMaxChars = settings.batchMaxChars || 3000;
+
+        await logger.info('background', `SPA遷移検知: ${details.url}`);
+
+        // SPA 遷移後は React/Vue 等がDOMを更新するまで少し待機
+        await new Promise(resolve => setTimeout(resolve, 800));
+
+        chrome.tabs.sendMessage(details.tabId, {
+            type: 'START_TRANSLATION',
+            targetLang,
+            batchMaxChars
+        }).catch(async (err) => {
+            await logger.warn('background', `SPA自動翻訳メッセージ送信失敗: ${err.message}`);
+        });
+    } catch (error) {
+        await logger.error('background', `SPA自動翻訳エラー: ${error.message}`, error.stack);
+    }
+});
+
+/**
  * ページ読み込み完了時の自動翻訳
  */
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
