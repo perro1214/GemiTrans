@@ -9,10 +9,22 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 } else {
     window.__LLM_TRANSLATOR_LOADED__ = true;
 
+    /**
+     * chrome.runtime.sendMessage の安全なラッパー
+     * 拡張機能リロード時に同期で投げられる "Extension context invalidated" を捕捉する
+     */
+    function safeSendMessage(message) {
+        try {
+            return chrome.runtime.sendMessage(message);
+        } catch (e) {
+            return Promise.reject(e);
+        }
+    }
+
     // Content Script 用ロガー（Background経由でログを保存）
     const contentLogger = {
         _send(level, message, detail) {
-            chrome.runtime.sendMessage({
+            safeSendMessage({
                 type: 'LOG',
                 level,
                 source: 'content',
@@ -177,6 +189,33 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
     }
 
     /**
+     * 並行実行数を制限しながら非同期タスクを実行する
+     * @param {Array} items - 処理対象リスト
+     * @param {number} concurrency - 最大同時実行数
+     * @param {function} taskFn - 各アイテムに適用する非同期関数
+     * @returns {Promise<Array<{status: string, value?, reason?}>>}
+     */
+    async function runWithConcurrency(items, concurrency, taskFn) {
+        const results = new Array(items.length);
+        let index = 0;
+
+        async function worker() {
+            while (index < items.length) {
+                const current = index++;
+                if (state.isCancelled) break;
+                try {
+                    results[current] = { status: 'fulfilled', value: await taskFn(items[current], current) };
+                } catch (e) {
+                    results[current] = { status: 'rejected', reason: e };
+                }
+            }
+        }
+
+        await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+        return results;
+    }
+
+    /**
      * ページを翻訳する
      * @param {string} targetLang - 翻訳先の言語
      * @param {number} batchMaxChars - バッチあたりの最大文字数
@@ -206,10 +245,23 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         showStatusBadge('🔄 翻訳中...', 'translating');
 
         try {
-            const textNodes = collectTextNodes();
-            const total = textNodes.length;
+            const allTextNodes = collectTextNodes();
 
-            contentLogger.info(`テキストノード収集完了: ${total}件`);
+            // デデュープ: テキスト → ノード群のマップ（同一テキストは1回だけAPIに送信）
+            const textToNodes = new Map();
+            for (const item of allTextNodes) {
+                if (!textToNodes.has(item.text)) textToNodes.set(item.text, []);
+                textToNodes.get(item.text).push(item);
+            }
+
+            // ユニークなテキストのみバッチ処理
+            const uniqueItems = [...textToNodes.keys()].map(text => ({
+                node: textToNodes.get(text)[0].node,
+                text
+            }));
+            const total = uniqueItems.length;
+
+            contentLogger.info(`テキストノード収集完了: ${allTextNodes.length}件 (ユニーク: ${total}件)`);
 
             if (total === 0) {
                 throw new Error('翻訳可能なテキストが見つかりませんでした');
@@ -217,58 +269,54 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
             // 文字数ベースで動的バッチ分割
             const maxChars = batchMaxChars === 0 ? Infinity : batchMaxChars;
-            const batches = chunkByChars(textNodes, maxChars);
+            const batches = chunkByChars(uniqueItems, maxChars);
             let processed = 0;
 
-            for (const batch of batches) {
-                // キャンセルチェック
-                if (state.isCancelled) {
-                    contentLogger.info('翻訳がキャンセルされました');
-                    showStatusBadge('⏹ キャンセル', 'cancelled');
-                    setTimeout(() => hideStatusBadge(), 2000);
-                    return;
-                }
+            const CONCURRENCY_LIMIT = 3;
 
+            // 並列でAPIリクエストを送信
+            const batchResults = await runWithConcurrency(batches, CONCURRENCY_LIMIT, async (batch) => {
+                if (state.isCancelled) return null;
                 const texts = batch.map(item => item.text);
+                const response = await safeSendMessage({ type: 'TRANSLATE', texts, targetLang });
+                if (!response.success) throw new Error(response.error);
+                return { batch, translatedTexts: response.translatedTexts };
+            });
 
-                const response = await chrome.runtime.sendMessage({
-                    type: 'TRANSLATE',
-                    texts,
-                    targetLang
-                });
+            // キャンセルチェック
+            if (state.isCancelled) {
+                contentLogger.info('翻訳がキャンセルされました');
+                showStatusBadge('⏹ キャンセル', 'cancelled');
+                setTimeout(() => hideStatusBadge(), 2000);
+                return;
+            }
 
-                if (!response.success) {
-                    contentLogger.error(`バッチ翻訳失敗: ${response.error}`);
-                    throw new Error(response.error);
+            // 全バッチ完了後にまとめてDOM更新
+            for (let i = 0; i < batchResults.length; i++) {
+                const result = batchResults[i];
+                if (result?.status !== 'fulfilled' || !result.value) {
+                    contentLogger.error(`バッチ${i}翻訳失敗`);
+                    continue;
                 }
-
-                // キャンセルチェック（API応答後）
-                if (state.isCancelled) {
-                    contentLogger.info('翻訳がキャンセルされました（API応答後）');
-                    showStatusBadge('⏹ キャンセル', 'cancelled');
-                    setTimeout(() => hideStatusBadge(), 2000);
-                    return;
-                }
-
-                const { translatedTexts } = response;
-                for (let i = 0; i < batch.length; i++) {
-                    const { node } = batch[i];
-                    const originalText = node.textContent;
-                    const translated = translatedTexts[i];
-
-                    if (translated && translated !== originalText) {
-                        state.originalTexts.set(node, originalText);
-                        node.textContent = translated;
-
-                        const parent = node.parentElement;
-                        if (parent) {
-                            parent.classList.add('llm-translated');
-                            parent.setAttribute('data-original-text', originalText);
-                            state.translatedElements.add(parent);
+                const { batch, translatedTexts } = result.value;
+                for (let j = 0; j < batch.length; j++) {
+                    const translated = translatedTexts[j];
+                    // 同一テキストを持つ全ノードに翻訳を適用
+                    const nodes = textToNodes.get(batch[j].text) || [batch[j]];
+                    for (const { node } of nodes) {
+                        if (translated && translated !== node.textContent) {
+                            const originalText = node.textContent;
+                            state.originalTexts.set(node, originalText);
+                            node.textContent = translated;
+                            const parent = node.parentElement;
+                            if (parent) {
+                                parent.classList.add('llm-translated');
+                                parent.setAttribute('data-original-text', originalText);
+                                state.translatedElements.add(parent);
+                            }
                         }
                     }
                 }
-
                 processed += batch.length;
                 const percent = Math.round((processed / total) * 100);
                 showStatusBadge(`🔄 ${percent}%`, 'translating');
@@ -280,7 +328,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             state.isTranslated = true;
             showStatusBadge('✅ 翻訳完了', 'done');
             setTimeout(() => hideStatusBadge(), 3000);
-            contentLogger.info(`翻訳完了: ${total}件のテキストを翻訳しました`);
+            contentLogger.info(`翻訳完了: ${allTextNodes.length}件のテキストを翻訳しました`);
 
             // 翻訳完了後に動的コンテンツを監視開始（Ajax・無限スクロール対応）
             startMutationObserver(targetLang, batchMaxChars);
@@ -411,7 +459,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
             const texts = batch.map(item => item.text);
             try {
-                const response = await chrome.runtime.sendMessage({
+                const response = await safeSendMessage({
                     type: 'TRANSLATE',
                     texts,
                     targetLang
@@ -471,7 +519,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             // 連続する DOM 変更をまとめて処理（デバウンス 500ms）
             clearTimeout(mutationDebounceTimer);
             mutationDebounceTimer = setTimeout(() => {
-                flushPendingMutations(targetLang, batchMaxChars);
+                flushPendingMutations(targetLang, batchMaxChars).catch(() => { });
             }, 500);
         });
 
@@ -511,7 +559,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         showStatusBadge('🔄 翻訳中...', 'translating');
 
         try {
-            const response = await chrome.runtime.sendMessage({
+            const response = await safeSendMessage({
                 type: 'TRANSLATE',
                 texts: [selectedText],
                 targetLang
@@ -553,7 +601,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.type === 'START_TRANSLATION') {
             translatePage(message.targetLang, message.batchMaxChars, (current, total) => {
-                chrome.runtime.sendMessage({
+                safeSendMessage({
                     type: 'TRANSLATION_PROGRESS',
                     current,
                     total
@@ -561,13 +609,13 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             })
                 .then(() => {
                     sendResponse({ success: true });
-                    chrome.runtime.sendMessage({
+                    safeSendMessage({
                         type: 'TRANSLATION_COMPLETE'
                     }).catch(() => { });
                 })
                 .catch(error => {
                     sendResponse({ success: false, error: error.message });
-                    chrome.runtime.sendMessage({
+                    safeSendMessage({
                         type: 'TRANSLATION_ERROR',
                         error: error.message
                     }).catch(() => { });

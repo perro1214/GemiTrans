@@ -14,6 +14,7 @@ const elements = {
     batchSize: document.getElementById('batch-size'),
     saveSettings: document.getElementById('save-settings'),
     autoTranslate: document.getElementById('auto-translate'),
+    verboseLog: document.getElementById('verbose-log'),
     translateBtn: document.getElementById('translate-btn'),
     cancelBtn: document.getElementById('cancel-btn'),
     restoreBtn: document.getElementById('restore-btn'),
@@ -25,8 +26,21 @@ const elements = {
     toggleLogs: document.getElementById('toggle-logs'),
     logViewer: document.getElementById('log-viewer'),
     logList: document.getElementById('log-list'),
-    clearLogs: document.getElementById('clear-logs')
+    clearLogs: document.getElementById('clear-logs'),
+    toggleUsage: document.getElementById('toggle-usage'),
+    usageViewer: document.getElementById('usage-viewer'),
+    usageContent: document.getElementById('usage-content'),
+    clearUsage: document.getElementById('clear-usage')
 };
+
+// ログフィルター状態
+const logFilter = {
+    levels: new Set(['INFO', 'WARN', 'ERROR']),
+    source: 'all'
+};
+
+// 取得済みログのキャッシュ（フィルター再適用用）
+let allFetchedLogs = [];
 
 // 初期化
 document.addEventListener('DOMContentLoaded', init);
@@ -47,7 +61,7 @@ async function init() {
  */
 async function loadSettings() {
     try {
-        const result = await chrome.storage.sync.get(['apiKey', 'targetLang', 'model', 'autoTranslate', 'batchMaxChars']);
+        const result = await chrome.storage.sync.get(['apiKey', 'targetLang', 'model', 'autoTranslate', 'batchMaxChars', 'verboseLog']);
 
         if (result.apiKey) {
             elements.apiKey.value = result.apiKey;
@@ -67,6 +81,7 @@ async function loadSettings() {
         }
 
         elements.autoTranslate.checked = !!result.autoTranslate;
+        elements.verboseLog.checked = !!result.verboseLog;
     } catch (error) {
         console.error('Failed to load settings:', error);
     }
@@ -125,11 +140,47 @@ function setupEventListeners() {
         await chrome.storage.sync.set({ autoTranslate: elements.autoTranslate.checked });
     });
 
+    // 詳細ログトグル
+    elements.verboseLog.addEventListener('change', async () => {
+        await chrome.storage.sync.set({ verboseLog: elements.verboseLog.checked });
+    });
+
+    // 使用量表示トグル
+    elements.toggleUsage.addEventListener('click', toggleUsageViewer);
+
+    // 使用量リセット
+    elements.clearUsage.addEventListener('click', handleClearUsage);
+
     // ログ表示トグル
     elements.toggleLogs.addEventListener('click', toggleLogViewer);
 
     // ログクリア
     elements.clearLogs.addEventListener('click', handleClearLogs);
+
+    // ログレベルフィルター
+    document.querySelectorAll('.log-chip input').forEach(input => {
+        input.addEventListener('change', () => {
+            const chip = input.closest('.log-chip');
+            if (input.checked) {
+                logFilter.levels.add(input.value);
+                chip.classList.add('active');
+            } else {
+                logFilter.levels.delete(input.value);
+                chip.classList.remove('active');
+            }
+            renderFilteredLogs();
+        });
+    });
+
+    // ログソースフィルター
+    document.querySelectorAll('.log-src-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.log-src-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            logFilter.source = btn.dataset.source;
+            renderFilteredLogs();
+        });
+    });
 
     // Background Script からの進捗メッセージを受信
     chrome.runtime.onMessage.addListener((message) => {
@@ -364,13 +415,13 @@ async function toggleLogViewer() {
 }
 
 /**
- * ログを読み込んで表示する
+ * ログを読み込む（最大200件取得してフィルタリング用にキャッシュ）
  */
 async function loadLogs() {
     try {
         const response = await chrome.runtime.sendMessage({
             type: 'GET_LOGS',
-            limit: 50
+            limit: 200
         });
 
         if (!response.success) {
@@ -378,36 +429,47 @@ async function loadLogs() {
             return;
         }
 
-        const logs = response.logs;
-
-        if (!logs || logs.length === 0) {
-            elements.logList.innerHTML = '<p class="log-empty">ログはありません</p>';
-            return;
-        }
-
-        elements.logList.innerHTML = logs.map(log => {
-            const time = new Date(log.timestamp).toLocaleString('ja-JP', {
-                month: '2-digit', day: '2-digit',
-                hour: '2-digit', minute: '2-digit', second: '2-digit'
-            });
-            const detailHtml = log.detail
-                ? `<div class="log-detail">${escapeHtml(log.detail)}</div>`
-                : '';
-            return `
-                <div class="log-entry">
-                    <div class="log-entry-header">
-                        <span class="log-badge ${log.level}">${log.level}</span>
-                        <span class="log-source">${escapeHtml(log.source)}</span>
-                        <span class="log-time">${time}</span>
-                    </div>
-                    <div class="log-message">${escapeHtml(log.message)}</div>
-                    ${detailHtml}
-                </div>
-            `;
-        }).join('');
+        allFetchedLogs = response.logs || [];
+        renderFilteredLogs();
     } catch (error) {
         elements.logList.innerHTML = '<p class="log-empty">ログの取得に失敗しました</p>';
     }
+}
+
+/**
+ * 現在のフィルター条件でログを再描画する
+ */
+function renderFilteredLogs() {
+    const filtered = allFetchedLogs.filter(log =>
+        logFilter.levels.has(log.level) &&
+        (logFilter.source === 'all' || log.source === logFilter.source)
+    );
+
+    if (filtered.length === 0) {
+        elements.logList.innerHTML = '<p class="log-empty">ログはありません</p>';
+        return;
+    }
+
+    elements.logList.innerHTML = filtered.map(log => {
+        const time = new Date(log.timestamp).toLocaleString('ja-JP', {
+            month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+        const detailHtml = log.detail
+            ? `<div class="log-detail">${escapeHtml(log.detail)}</div>`
+            : '';
+        return `
+            <div class="log-entry">
+                <div class="log-entry-header">
+                    <span class="log-badge ${log.level}">${log.level}</span>
+                    <span class="log-source">${escapeHtml(log.source)}</span>
+                    <span class="log-time">${time}</span>
+                </div>
+                <div class="log-message">${escapeHtml(log.message)}</div>
+                ${detailHtml}
+            </div>
+        `;
+    }).join('');
 }
 
 /**
@@ -416,10 +478,113 @@ async function loadLogs() {
 async function handleClearLogs() {
     try {
         await chrome.runtime.sendMessage({ type: 'CLEAR_LOGS' });
+        allFetchedLogs = [];
         elements.logList.innerHTML = '<p class="log-empty">ログはありません</p>';
     } catch (error) {
         console.error('Failed to clear logs:', error);
     }
+}
+
+/**
+ * 使用量ビューアーの表示/非表示を切り替える
+ */
+async function toggleUsageViewer() {
+    const isHidden = elements.usageViewer.classList.contains('hidden');
+    if (isHidden) {
+        elements.usageViewer.classList.remove('hidden');
+        elements.toggleUsage.querySelector('.btn-text').textContent = '📊 使用量を非表示';
+        await loadUsage();
+    } else {
+        elements.usageViewer.classList.add('hidden');
+        elements.toggleUsage.querySelector('.btn-text').textContent = '📊 使用量を表示';
+    }
+}
+
+/**
+ * 使用量をリセットする
+ */
+async function handleClearUsage() {
+    try {
+        await chrome.runtime.sendMessage({ type: 'CLEAR_USAGE' });
+        elements.usageContent.innerHTML = '<p class="usage-empty">使用データがありません</p>';
+    } catch (error) {
+        console.error('Failed to clear usage:', error);
+    }
+}
+
+/**
+ * 使用量データを読み込んで表示する
+ */
+async function loadUsage() {
+    try {
+        const response = await chrome.runtime.sendMessage({ type: 'GET_USAGE' });
+        if (!response.success || !response.usage) {
+            elements.usageContent.innerHTML = '<p class="usage-empty">使用データがありません</p>';
+            return;
+        }
+        renderUsage(response.usage, response.pricing || {});
+    } catch (error) {
+        elements.usageContent.innerHTML = '<p class="usage-empty">データの取得に失敗しました</p>';
+    }
+}
+
+/**
+ * 使用量データを描画する
+ */
+function renderUsage(usage, pricing) {
+    // モデルごとのコストを計算
+    let totalCost = 0;
+    const modelRows = Object.entries(usage.byModel || {}).map(([model, data]) => {
+        const price = pricing[model] || { input: 0.10, output: 0.40 };
+        const cost = (data.inputTokens * price.input + data.outputTokens * price.output) / 1_000_000;
+        totalCost += cost;
+        return { model, data, cost };
+    });
+
+    const formatTokens = n => n >= 1_000_000
+        ? (n / 1_000_000).toFixed(2) + 'M'
+        : n >= 1000
+            ? (n / 1000).toFixed(1) + 'K'
+            : String(n);
+
+    const formatCost = c => c < 0.0001 ? '< $0.0001' : `$${c.toFixed(4)}`;
+
+    const since = new Date(usage.since).toLocaleString('ja-JP', {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit'
+    });
+
+    const modelRowsHtml = modelRows.map(({ model, data, cost }) => `
+        <div class="usage-model-row">
+            <span class="usage-model-name">${escapeHtml(model)}</span>
+            <span class="usage-model-tokens">${formatTokens(data.inputTokens)} in / ${formatTokens(data.outputTokens)} out</span>
+            <span class="usage-model-cost">${formatCost(cost)}</span>
+        </div>
+    `).join('');
+
+    elements.usageContent.innerHTML = `
+        <div class="usage-cost-row">
+            <span class="usage-cost-label">推定コスト</span>
+            <span class="usage-cost-value">${formatCost(totalCost)}</span>
+            <span class="usage-cost-note">有料プランの場合</span>
+        </div>
+        <div class="usage-stats">
+            <div class="usage-stat">
+                <span class="usage-stat-value">${formatTokens(usage.totalInputTokens)}</span>
+                <span class="usage-stat-label">入力 tokens</span>
+            </div>
+            <div class="usage-stat">
+                <span class="usage-stat-value">${formatTokens(usage.totalOutputTokens)}</span>
+                <span class="usage-stat-label">出力 tokens</span>
+            </div>
+            <div class="usage-stat">
+                <span class="usage-stat-value">${usage.totalRequests.toLocaleString()}</span>
+                <span class="usage-stat-label">リクエスト</span>
+            </div>
+        </div>
+        ${modelRows.length > 0 ? `<div class="usage-models">${modelRowsHtml}</div>` : ''}
+        <div class="usage-since">計測開始: ${since}</div>
+    `;
 }
 
 /**

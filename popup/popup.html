@@ -101,6 +101,17 @@
           <span class="toggle-slider"></span>
         </label>
       </div>
+
+      <div class="field toggle-field">
+        <label class="toggle-label" for="verbose-log">
+          <span class="label-icon">🔍</span>
+          <span>詳細ログ（verbose）</span>
+        </label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="verbose-log">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
     </section>
 
     <!-- 翻訳セクション -->
@@ -134,6 +145,23 @@
       <div id="status-message" class="status-message hidden"></div>
     </section>
 
+    <!-- 使用量セクション -->
+    <section class="section" id="usage-section">
+      <div class="divider"></div>
+      <button id="toggle-usage" class="btn btn-secondary btn-sm">
+        <span class="btn-text">📊 使用量を表示</span>
+      </button>
+      <div id="usage-viewer" class="usage-viewer hidden">
+        <div class="usage-header">
+          <span class="usage-title">API使用量</span>
+          <button id="clear-usage" class="btn-icon btn-icon-sm" title="使用量をリセット">🗑</button>
+        </div>
+        <div id="usage-content" class="usage-content">
+          <p class="usage-empty">使用データがありません</p>
+        </div>
+      </div>
+    </section>
+
     <!-- ログセクション -->
     <section class="section" id="log-section">
       <div class="divider"></div>
@@ -142,8 +170,26 @@
       </button>
       <div id="log-viewer" class="log-viewer hidden">
         <div class="log-header">
-          <span class="log-title">エラーログ</span>
+          <span class="log-title">開発者ログ</span>
           <button id="clear-logs" class="btn-icon btn-icon-sm" title="ログをクリア">🗑</button>
+        </div>
+        <div class="log-filters">
+          <div class="log-level-filters">
+            <label class="log-chip INFO active" title="INFOを表示">
+              <input type="checkbox" value="INFO" checked> INFO
+            </label>
+            <label class="log-chip WARN active" title="WARNを表示">
+              <input type="checkbox" value="WARN" checked> WARN
+            </label>
+            <label class="log-chip ERROR active" title="ERRORを表示">
+              <input type="checkbox" value="ERROR" checked> ERROR
+            </label>
+          </div>
+          <div class="log-source-filters">
+            <button class="log-src-btn active" data-source="all">全て</button>
+            <button class="log-src-btn" data-source="background">BG</button>
+            <button class="log-src-btn" data-source="content">CT</button>
+          </div>
         </div>
         <div id="log-list" class="log-list">
           <p class="log-empty">ログはありません</p>

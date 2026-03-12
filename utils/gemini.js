@@ -70,7 +70,7 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
  * @param {string} [model] - 使用するモデル名
  * @returns {Promise<string>} 翻訳されたテキスト
  */
-export async function translateText(text, targetLang, apiKey, model = DEFAULT_MODEL) {
+export async function translateText(text, targetLang, apiKey, model = DEFAULT_MODEL, onUsage = null) {
   if (!text || !text.trim()) {
     return text;
   }
@@ -116,6 +116,13 @@ export async function translateText(text, targetLang, apiKey, model = DEFAULT_MO
     throw new Error('翻訳結果の取得に失敗しました');
   }
 
+  if (onUsage && data.usageMetadata) {
+    onUsage({
+      inputTokens: data.usageMetadata.promptTokenCount || 0,
+      outputTokens: data.usageMetadata.candidatesTokenCount || 0
+    });
+  }
+
   return translatedText.trim();
 }
 
@@ -129,7 +136,7 @@ function buildTranslationPrompt(text, targetLang) {
   return `You are a professional translator. Translate the following text to ${targetLang}.
 
 Rules:
-- Translate ONLY the text content, preserving any formatting markers like [SEP] exactly as they are.
+- Translate ONLY the text content.
 - Do NOT add any explanations, notes, or metadata.
 - Do NOT wrap the translation in quotes or code blocks.
 - Maintain the original tone and style.
@@ -138,6 +145,59 @@ Rules:
 
 Text to translate:
 ${text}`;
+}
+
+/**
+ * バッチ翻訳用プロンプトを構築する（番号付きフォーマット）
+ * [SEP] 方式より番号付きの方がGeminiが構造を崩しにくい
+ */
+function buildBatchPrompt(texts, targetLang) {
+  const numbered = texts.map((t, i) => `[${i + 1}] ${t}`).join('\n');
+  return `You are a professional translator. Translate each numbered item to ${targetLang}.
+
+Rules:
+- Output ONLY the translations in the same numbered format: [1] ..., [2] ..., etc.
+- One item per line. Do NOT add explanations, blank lines between items, or extra text.
+- If an item is already in ${targetLang}, return it as-is.
+- Translate naturally and fluently, not word-by-word.
+- Preserve inline code, URLs, file paths, and technical terms exactly as they are.
+
+Items:
+${numbered}`;
+}
+
+/**
+ * 番号付きフォーマットのレスポンスをパースする
+ * 複数行にまたがる翻訳も正しく収集する
+ * @param {string} responseText
+ * @param {number} expectedCount
+ * @returns {Array<string|null>} パース結果（取得できなかった項目はnull）
+ */
+function parseBatchResponse(responseText, expectedCount) {
+  const results = new Array(expectedCount).fill(null);
+  let currentIdx = -1;
+  let currentLines = [];
+
+  function flush() {
+    if (currentIdx >= 0 && currentIdx < expectedCount) {
+      const value = currentLines.join('\n').trim();
+      results[currentIdx] = value || null;
+    }
+  }
+
+  for (const line of responseText.split('\n')) {
+    const match = line.match(/^\[(\d+)\]\s*(.*)/);
+    if (match) {
+      flush();
+      currentIdx = parseInt(match[1], 10) - 1;
+      currentLines = [match[2]];
+    } else if (currentIdx >= 0) {
+      currentLines.push(line);
+    }
+  }
+  flush();
+
+  return results;
 }
 
 /**
@@ -173,40 +233,74 @@ export function splitIntoBatches(texts, maxChars = MAX_BATCH_CHARS) {
 
 /**
  * テキストの配列をバッチで翻訳する
- * 複数のテキストを [SEP] で区切って一度に翻訳する
+ * 番号付きフォーマットで一括送信し、パースできなかった項目のみ並列で個別翻訳する
  * @param {string[]} texts - 翻訳するテキストの配列
  * @param {string} targetLang - 翻訳先の言語
  * @param {string} apiKey - Gemini API キー
  * @param {string} [model] - 使用するモデル名
  * @returns {Promise<string[]>} 翻訳されたテキストの配列
  */
-export async function translateBatch(texts, targetLang, apiKey, model = DEFAULT_MODEL) {
+export async function translateBatch(texts, targetLang, apiKey, model = DEFAULT_MODEL, onUsage = null) {
   if (!texts || texts.length === 0) return [];
 
-  // 短いテキストはまとめて翻訳する
-  const separator = ' [SEP] ';
-  const combined = texts.join(separator);
-
-  const translated = await translateText(combined, targetLang, apiKey, model);
-
-  // セパレータで分割して結果を返す
-  const results = translated.split('[SEP]').map(t => t.trim());
-
-  // 結果の数が入力と異なる場合は個別に翻訳する
-  if (results.length !== texts.length) {
-    const individualResults = [];
-    for (const text of texts) {
-      try {
-        const result = await translateText(text, targetLang, apiKey, model);
-        individualResults.push(result);
-      } catch (e) {
-        individualResults.push(text); // 失敗時は原文を返す
-      }
+  // 1件のみの場合は通常翻訳
+  if (texts.length === 1) {
+    try {
+      return [await translateText(texts[0], targetLang, apiKey, model, onUsage)];
+    } catch (e) {
+      return [texts[0]];
     }
-    return individualResults;
   }
 
-  return results;
+  const url = `${GEMINI_API_BASE}/${model}:generateContent?key=${apiKey}`;
+
+  try {
+    // 番号付きフォーマットでバッチリクエスト
+    const response = await fetchWithRetry(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: buildBatchPrompt(texts, targetLang) }] }],
+        generationConfig: { temperature: 0.1, topP: 0.95, maxOutputTokens: 8192 }
+      })
+    });
+
+    const data = await response.json();
+
+    if (onUsage && data.usageMetadata) {
+      onUsage({
+        inputTokens: data.usageMetadata.promptTokenCount || 0,
+        outputTokens: data.usageMetadata.candidatesTokenCount || 0
+      });
+    }
+
+    const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const parsed = parseBatchResponse(responseText, texts.length);
+
+    // パースできなかった項目だけ並列で個別翻訳（直列フォールバックを廃止）
+    const missIndices = parsed.reduce((acc, r, i) => {
+      if (r === null) acc.push(i);
+      return acc;
+    }, []);
+
+    if (missIndices.length === 0) return parsed;
+
+    const missResults = await Promise.all(
+      missIndices.map(async i => {
+        try { return await translateText(texts[i], targetLang, apiKey, model, onUsage); }
+        catch (e) { return texts[i]; }
+      })
+    );
+    missIndices.forEach((origIdx, j) => { parsed[origIdx] = missResults[j]; });
+    return parsed;
+
+  } catch (e) {
+    // バッチリクエスト自体が失敗した場合も並列で個別翻訳
+    return Promise.all(texts.map(async text => {
+      try { return await translateText(text, targetLang, apiKey, model, onUsage); }
+      catch (e) { return text; }
+    }));
+  }
 }
 
 /**
