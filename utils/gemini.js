@@ -10,6 +10,7 @@ const DEFAULT_MODEL = 'gemini-2.0-flash';
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 1000; // 1秒
 const RETRYABLE_STATUS_CODES = [429, 500, 503];
+const REQUEST_TIMEOUT_MS = 30000;
 
 // バッチ設定
 const MAX_BATCH_CHARS = 3000; // バッチあたり最大文字数
@@ -25,8 +26,16 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
   let lastError;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
     try {
-      const response = await fetch(url, options);
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
 
       if (response.ok) {
         return response;
@@ -46,13 +55,18 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
       const errorMessage = errorData?.error?.message || response.statusText;
       throw new Error(`Gemini API Error (${response.status}): ${errorMessage}`);
     } catch (error) {
+      clearTimeout(timeoutId);
       lastError = error;
 
       // ネットワークエラーの場合もリトライ
-      if (error.name === 'TypeError' && attempt < maxRetries) {
+      if ((error.name === 'TypeError' || error.name === 'AbortError') && attempt < maxRetries) {
         const delay = RETRY_BASE_DELAY * Math.pow(2, attempt);
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
+      }
+
+      if (error.name === 'AbortError') {
+        throw new Error(`Gemini API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
       }
 
       throw error;

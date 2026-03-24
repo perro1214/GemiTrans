@@ -5,7 +5,9 @@
 
 import { translateBatch, testApiKey } from '../utils/gemini.js';
 import { logger, getLogs, clearLogs } from '../utils/logger.js';
-import { checkBatchCache, saveBatchToCache } from '../utils/cache.js';
+import { checkBatchCache, saveBatchToCache, clearCache } from '../utils/cache.js';
+
+const settingsStorage = chrome.storage.local;
 
 // インメモリキャッシュ（Service Worker が生きている間有効）
 const memoryCache = new Map();
@@ -68,6 +70,8 @@ function makeMemoryCacheKey(text, targetLang) {
 
 // コンテキストメニューの作成
 chrome.runtime.onInstalled.addListener(() => {
+    if (!chrome.contextMenus?.create) return;
+
     chrome.contextMenus.create({
         id: 'translate-selection',
         title: '選択テキストを翻訳',
@@ -75,66 +79,70 @@ chrome.runtime.onInstalled.addListener(() => {
     });
 });
 
-// コンテキストメニュークリック
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-    if (info.menuItemId !== 'translate-selection' || !tab?.id) return;
+// Safari iOS など、未実装APIがあるブラウザでも Service Worker が落ちないようにガードする
+if (chrome.contextMenus?.onClicked) {
+    chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+        if (info.menuItemId !== 'translate-selection' || !tab?.id) return;
 
-    try {
-        const settings = await chrome.storage.sync.get(['apiKey', 'targetLang', 'batchMaxChars']);
-        if (!settings.apiKey) {
-            await logger.warn('background', 'コンテキストメニュー: APIキー未設定');
-            return;
+        try {
+            const settings = await settingsStorage.get(['apiKey', 'targetLang', 'batchMaxChars']);
+            if (!settings.apiKey) {
+                await logger.warn('background', 'コンテキストメニュー: APIキー未設定');
+                return;
+            }
+            const targetLang = settings.targetLang || '日本語';
+            const batchMaxChars = settings.batchMaxChars || 3000;
+
+            // Content script を注入（必要であれば）
+            await ensureContentScript(tab.id);
+
+            chrome.tabs.sendMessage(tab.id, {
+                type: 'TRANSLATE_SELECTION',
+                targetLang,
+                batchMaxChars
+            }).catch(async (err) => {
+                await logger.error('background', `選択翻訳エラー: ${err.message}`);
+            });
+        } catch (error) {
+            await logger.error('background', `コンテキストメニューエラー: ${error.message}`);
         }
-        const targetLang = settings.targetLang || '日本語';
-        const batchMaxChars = settings.batchMaxChars || 3000;
-
-        // Content script を注入（必要であれば）
-        await ensureContentScript(tab.id);
-
-        chrome.tabs.sendMessage(tab.id, {
-            type: 'TRANSLATE_SELECTION',
-            targetLang,
-            batchMaxChars
-        }).catch(async (err) => {
-            await logger.error('background', `選択翻訳エラー: ${err.message}`);
-        });
-    } catch (error) {
-        await logger.error('background', `コンテキストメニューエラー: ${error.message}`);
-    }
-});
+    });
+}
 
 // キーボードショートカット
-chrome.commands.onCommand.addListener(async (command) => {
-    if (command !== 'translate-page') return;
+if (chrome.commands?.onCommand) {
+    chrome.commands.onCommand.addListener(async (command) => {
+        if (command !== 'translate-page') return;
 
-    try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab?.id) return;
-        if (tab.url?.startsWith('chrome://') || tab.url?.startsWith('chrome-extension://')) return;
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!tab?.id) return;
+            if (tab.url?.startsWith('chrome://') || tab.url?.startsWith('chrome-extension://')) return;
 
-        const settings = await chrome.storage.sync.get(['apiKey', 'targetLang', 'batchMaxChars']);
-        if (!settings.apiKey) {
-            await logger.warn('background', 'ショートカット: APIキー未設定');
-            return;
+            const settings = await settingsStorage.get(['apiKey', 'targetLang', 'batchMaxChars']);
+            if (!settings.apiKey) {
+                await logger.warn('background', 'ショートカット: APIキー未設定');
+                return;
+            }
+            const targetLang = settings.targetLang || '日本語';
+            const batchMaxChars = settings.batchMaxChars || 3000;
+
+            await logger.info('background', `ショートカットで翻訳開始: ${tab.url}`);
+
+            await ensureContentScript(tab.id);
+
+            chrome.tabs.sendMessage(tab.id, {
+                type: 'START_TRANSLATION',
+                targetLang,
+                batchMaxChars
+            }).catch(async (err) => {
+                await logger.error('background', `ショートカット翻訳エラー: ${err.message}`);
+            });
+        } catch (error) {
+            await logger.error('background', `ショートカットエラー: ${error.message}`);
         }
-        const targetLang = settings.targetLang || '日本語';
-        const batchMaxChars = settings.batchMaxChars || 3000;
-
-        await logger.info('background', `ショートカットで翻訳開始: ${tab.url}`);
-
-        await ensureContentScript(tab.id);
-
-        chrome.tabs.sendMessage(tab.id, {
-            type: 'START_TRANSLATION',
-            targetLang,
-            batchMaxChars
-        }).catch(async (err) => {
-            await logger.error('background', `ショートカット翻訳エラー: ${err.message}`);
-        });
-    } catch (error) {
-        await logger.error('background', `ショートカットエラー: ${error.message}`);
-    }
-});
+    });
+}
 
 /**
  * Content Script が注入されていなければ注入する
@@ -196,6 +204,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         handleClearUsage(sendResponse);
         return true;
     }
+
+    if (message.type === 'CLEAR_CACHE') {
+        clearCache()
+            .then(() => {
+                memoryCache.clear();
+                sendResponse({ success: true });
+            })
+            .catch(e => sendResponse({ success: false, error: e.message }));
+        return true;
+    }
+
+    // Content script からの UI 通知は SW にしか届かない環境があるため、オープン中の拡張ページ（ポップアップ等）へ転送する
+    const forwardToExtensionPages = new Set([
+        'TRANSLATION_PROGRESS',
+        'TRANSLATION_COMPLETE',
+        'TRANSLATION_SKIPPED',
+        'TRANSLATION_CANCELLED',
+        'TRANSLATION_ERROR'
+    ]);
+    if (forwardToExtensionPages.has(message.type) && sender.tab) {
+        chrome.runtime.sendMessage(message).catch(() => { });
+        return false;
+    }
 });
 
 /**
@@ -205,7 +236,7 @@ async function handleTranslate(message, sender, sendResponse) {
     try {
         const { texts, targetLang } = message;
 
-        const settings = await chrome.storage.sync.get(['apiKey', 'model', 'verboseLog']);
+        const settings = await settingsStorage.get(['apiKey', 'model', 'verboseLog']);
         const apiKey = settings.apiKey;
         const model = settings.model || 'gemini-2.0-flash';
         const verboseLog = !!settings.verboseLog;
@@ -328,7 +359,7 @@ async function handleTestApiKey(message, sendResponse) {
  */
 async function handleGetSettings(sendResponse) {
     try {
-        const settings = await chrome.storage.sync.get(['apiKey', 'targetLang', 'model']);
+        const settings = await settingsStorage.get(['apiKey', 'targetLang', 'model']);
         sendResponse({ success: true, settings });
     } catch (error) {
         await logger.error('background', `設定取得エラー: ${error.message}`);
@@ -402,7 +433,7 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
     if (details.frameId !== 0) return;
 
     try {
-        const settings = await chrome.storage.sync.get(['apiKey', 'targetLang', 'autoTranslate', 'batchMaxChars']);
+        const settings = await settingsStorage.get(['apiKey', 'targetLang', 'autoTranslate', 'batchMaxChars']);
         if (!settings.autoTranslate || !settings.apiKey) return;
 
         const targetLang = settings.targetLang || '日本語';
@@ -433,7 +464,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) return;
 
     try {
-        const settings = await chrome.storage.sync.get(['apiKey', 'targetLang', 'model', 'autoTranslate', 'batchMaxChars']);
+        const settings = await settingsStorage.get(['apiKey', 'targetLang', 'model', 'autoTranslate', 'batchMaxChars']);
 
         if (!settings.autoTranslate || !settings.apiKey) return;
 

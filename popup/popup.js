@@ -30,7 +30,8 @@ const elements = {
     toggleUsage: document.getElementById('toggle-usage'),
     usageViewer: document.getElementById('usage-viewer'),
     usageContent: document.getElementById('usage-content'),
-    clearUsage: document.getElementById('clear-usage')
+    clearUsage: document.getElementById('clear-usage'),
+    clearCache: document.getElementById('clear-cache')
 };
 
 // ログフィルター状態
@@ -41,6 +42,8 @@ const logFilter = {
 
 // 取得済みログのキャッシュ（フィルター再適用用）
 let allFetchedLogs = [];
+const settingsStorage = chrome.storage.local;
+const MESSAGE_TIMEOUT_MS = 30000;
 
 // 初期化
 document.addEventListener('DOMContentLoaded', init);
@@ -61,7 +64,7 @@ async function init() {
  */
 async function loadSettings() {
     try {
-        const result = await chrome.storage.sync.get(['apiKey', 'targetLang', 'model', 'autoTranslate', 'batchMaxChars', 'verboseLog']);
+        const result = await settingsStorage.get(['apiKey', 'targetLang', 'model', 'autoTranslate', 'batchMaxChars', 'verboseLog']);
 
         if (result.apiKey) {
             elements.apiKey.value = result.apiKey;
@@ -72,7 +75,7 @@ async function loadSettings() {
             elements.targetLang.value = result.targetLang;
         }
 
-        if (result.model) {
+        if (result.model && [...elements.modelSelect.options].some(o => o.value === result.model)) {
             elements.modelSelect.value = result.model;
         }
 
@@ -137,12 +140,12 @@ function setupEventListeners() {
 
     // 自動翻訳トグル
     elements.autoTranslate.addEventListener('change', async () => {
-        await chrome.storage.sync.set({ autoTranslate: elements.autoTranslate.checked });
+        await settingsStorage.set({ autoTranslate: elements.autoTranslate.checked });
     });
 
     // 詳細ログトグル
     elements.verboseLog.addEventListener('change', async () => {
-        await chrome.storage.sync.set({ verboseLog: elements.verboseLog.checked });
+        await settingsStorage.set({ verboseLog: elements.verboseLog.checked });
     });
 
     // 使用量表示トグル
@@ -150,6 +153,9 @@ function setupEventListeners() {
 
     // 使用量リセット
     elements.clearUsage.addEventListener('click', handleClearUsage);
+
+    // 翻訳キャッシュクリア
+    elements.clearCache.addEventListener('click', handleClearCache);
 
     // ログ表示トグル
     elements.toggleLogs.addEventListener('click', toggleLogViewer);
@@ -182,13 +188,22 @@ function setupEventListeners() {
         });
     });
 
-    // Background Script からの進捗メッセージを受信
+    // Content / 拡張からの進捗メッセージを受信
     chrome.runtime.onMessage.addListener((message) => {
         if (message.type === 'TRANSLATION_PROGRESS') {
             updateProgress(message.current, message.total);
         }
         if (message.type === 'TRANSLATION_COMPLETE') {
             onTranslationComplete();
+        }
+        if (message.type === 'TRANSLATION_SKIPPED') {
+            setTranslating(false);
+            elements.progressContainer.classList.add('hidden');
+            showStatus('日本語ページのため翻訳をスキップしました（APIを節約）', 'info');
+        }
+        if (message.type === 'TRANSLATION_CANCELLED') {
+            setTranslating(false);
+            elements.progressContainer.classList.add('hidden');
         }
         if (message.type === 'TRANSLATION_ERROR') {
             onTranslationError(message.error);
@@ -217,12 +232,12 @@ async function saveSettings() {
     saveBtn.disabled = true;
 
     // まず設定を保存する
-    await chrome.storage.sync.set({ apiKey, targetLang, model, batchMaxChars });
+    await settingsStorage.set({ apiKey, targetLang, model, batchMaxChars });
     elements.translateBtn.disabled = false;
 
     try {
         // APIキーをテスト
-        const response = await chrome.runtime.sendMessage({
+        const response = await sendRuntimeMessageWithTimeout({
             type: 'TEST_API_KEY',
             apiKey,
             model
@@ -259,7 +274,7 @@ async function startTranslation() {
         // Content script にメッセージを送信
         // Content script がまだ読み込まれていない場合は注入する
         try {
-            await chrome.tabs.sendMessage(tab.id, { type: 'GET_TRANSLATION_STATE' });
+            await sendTabMessageWithTimeout(tab.id, { type: 'GET_TRANSLATION_STATE' }, 5000);
         } catch {
             // Content script を注入
             await chrome.scripting.executeScript({
@@ -274,8 +289,8 @@ async function startTranslation() {
             await new Promise(resolve => setTimeout(resolve, 200));
         }
 
-        const settings = await chrome.storage.sync.get(['batchMaxChars']);
-        const response = await chrome.tabs.sendMessage(tab.id, {
+        const settings = await settingsStorage.get(['batchMaxChars']);
+        const response = await sendTabMessageWithTimeout(tab.id, {
             type: 'START_TRANSLATION',
             targetLang,
             batchMaxChars: settings.batchMaxChars || 3000
@@ -419,7 +434,7 @@ async function toggleLogViewer() {
  */
 async function loadLogs() {
     try {
-        const response = await chrome.runtime.sendMessage({
+        const response = await sendRuntimeMessageWithTimeout({
             type: 'GET_LOGS',
             limit: 200
         });
@@ -477,7 +492,7 @@ function renderFilteredLogs() {
  */
 async function handleClearLogs() {
     try {
-        await chrome.runtime.sendMessage({ type: 'CLEAR_LOGS' });
+        await sendRuntimeMessageWithTimeout({ type: 'CLEAR_LOGS' });
         allFetchedLogs = [];
         elements.logList.innerHTML = '<p class="log-empty">ログはありません</p>';
     } catch (error) {
@@ -501,11 +516,31 @@ async function toggleUsageViewer() {
 }
 
 /**
+ * 翻訳キャッシュをクリアする
+ */
+async function handleClearCache() {
+    try {
+        const btn = elements.clearCache;
+        btn.disabled = true;
+        btn.querySelector('.btn-text').textContent = '🗑 クリア中...';
+        await sendRuntimeMessageWithTimeout({ type: 'CLEAR_CACHE' });
+        btn.querySelector('.btn-text').textContent = '✅ クリア完了';
+        setTimeout(() => {
+            btn.querySelector('.btn-text').textContent = '🗑 翻訳キャッシュをクリア';
+            btn.disabled = false;
+        }, 2000);
+    } catch (error) {
+        elements.clearCache.querySelector('.btn-text').textContent = '🗑 翻訳キャッシュをクリア';
+        elements.clearCache.disabled = false;
+    }
+}
+
+/**
  * 使用量をリセットする
  */
 async function handleClearUsage() {
     try {
-        await chrome.runtime.sendMessage({ type: 'CLEAR_USAGE' });
+        await sendRuntimeMessageWithTimeout({ type: 'CLEAR_USAGE' });
         elements.usageContent.innerHTML = '<p class="usage-empty">使用データがありません</p>';
     } catch (error) {
         console.error('Failed to clear usage:', error);
@@ -517,7 +552,7 @@ async function handleClearUsage() {
  */
 async function loadUsage() {
     try {
-        const response = await chrome.runtime.sendMessage({ type: 'GET_USAGE' });
+        const response = await sendRuntimeMessageWithTimeout({ type: 'GET_USAGE' });
         if (!response.success || !response.usage) {
             elements.usageContent.innerHTML = '<p class="usage-empty">使用データがありません</p>';
             return;
@@ -594,4 +629,21 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function withTimeout(promise, timeoutMs, label) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(`${label} がタイムアウトしました (${Math.round(timeoutMs / 1000)}秒)`)), timeoutMs);
+        })
+    ]);
+}
+
+function sendRuntimeMessageWithTimeout(message, timeoutMs = MESSAGE_TIMEOUT_MS) {
+    return withTimeout(chrome.runtime.sendMessage(message), timeoutMs, '拡張機能との通信');
+}
+
+function sendTabMessageWithTimeout(tabId, message, timeoutMs = MESSAGE_TIMEOUT_MS) {
+    return withTimeout(chrome.tabs.sendMessage(tabId, message), timeoutMs, 'ページとの通信');
 }

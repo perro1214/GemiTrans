@@ -96,6 +96,74 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         return jaNames.includes(targetLang);
     }
 
+    // ========== JS ツールチップ ==========
+    let tooltipEl = null;
+
+    function getTooltip() {
+        if (!tooltipEl) {
+            tooltipEl = document.createElement('div');
+            tooltipEl.id = 'llm-translate-tooltip';
+            document.body.appendChild(tooltipEl);
+        }
+        return tooltipEl;
+    }
+
+    function positionTooltip(tooltip, mouseX, mouseY) {
+        // 一度表示してサイズを計測
+        tooltip.style.visibility = 'hidden';
+        tooltip.style.display = 'block';
+        const w = tooltip.offsetWidth;
+        const h = tooltip.offsetHeight;
+        tooltip.style.visibility = '';
+
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const margin = 8;
+
+        // カーソルの上に表示、収まらなければ下に
+        let top = mouseY - h - 12;
+        if (top < margin) top = mouseY + 16;
+
+        let left = mouseX - w / 2;
+        left = Math.max(margin, Math.min(left, vw - w - margin));
+
+        // ビューポート下端を超えないよう補正
+        if (top + h > vh - margin) top = vh - h - margin;
+
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = top + 'px';
+    }
+
+    function showTooltip(el, mouseX, mouseY) {
+        // この要素の子テキストノードの元テキストを収集
+        const parts = [];
+        for (const [node, origText] of state.originalTexts) {
+            if (el.contains(node)) parts.push(origText);
+        }
+        if (parts.length === 0) return;
+
+        const tooltip = getTooltip();
+        tooltip.textContent = parts.join('\n');
+        positionTooltip(tooltip, mouseX, mouseY);
+    }
+
+    function hideTooltip() {
+        if (tooltipEl) tooltipEl.style.display = 'none';
+    }
+
+    // document レベルで委譲（要素ごとのリスナー不要）
+    document.addEventListener('mouseover', (e) => {
+        const el = e.target.closest('.llm-translated');
+        if (el) showTooltip(el, e.clientX, e.clientY);
+        else hideTooltip();
+    });
+    document.addEventListener('mousemove', (e) => {
+        if (tooltipEl && tooltipEl.style.display !== 'none') {
+            positionTooltip(tooltipEl, e.clientX, e.clientY);
+        }
+    });
+    // ========================================
+
     // ステータスバッジ
     let statusBadge = null;
 
@@ -136,8 +204,10 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
                 acceptNode(node) {
                     if (!node.parentElement) return NodeFilter.FILTER_REJECT;
                     if (SKIP_TAGS.has(node.parentElement.tagName)) return NodeFilter.FILTER_REJECT;
+                    // code/pre の子孫もスキップ（シンタックスハイライト用 <span> を含む）
+                    if (node.parentElement.closest('pre, code')) return NodeFilter.FILTER_REJECT;
                     if (node.parentElement.closest('[contenteditable="true"]')) return NodeFilter.FILTER_REJECT;
-                    if (node.parentElement.classList.contains('llm-translate-tooltip')) return NodeFilter.FILTER_REJECT;
+                    if (node.parentElement.id === 'llm-translate-tooltip') return NodeFilter.FILTER_REJECT;
                     if (node.parentElement.id === 'llm-translate-badge') return NodeFilter.FILTER_REJECT;
 
                     const text = node.textContent.trim();
@@ -152,6 +222,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         while ((node = walker.nextNode())) {
             textNodes.push({
                 node,
+                // trim したものをAPIに送るが、前後空白は node.textContent から復元する
                 text: node.textContent.trim()
             });
         }
@@ -220,9 +291,10 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
      * @param {string} targetLang - 翻訳先の言語
      * @param {number} batchMaxChars - バッチあたりの最大文字数
      * @param {function} onProgress - 進捗コールバック (current, total)
+     * @returns {Promise<{ outcome: 'completed' | 'skipped' | 'cancelled' | 'busy' }>}
      */
     async function translatePage(targetLang, batchMaxChars = 3000, onProgress) {
-        if (state.isTranslating) return;
+        if (state.isTranslating) return { outcome: 'busy' };
 
         // 既翻訳状態の場合はリセット（SPA遷移後の再翻訳に対応）
         if (state.isTranslated) {
@@ -235,7 +307,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             const pageLang = detectPageLanguage();
             if (pageLang === 'ja') {
                 contentLogger.info('日本語ページのため翻訳をスキップします（APIリクエスト節約）');
-                return;
+                return { outcome: 'skipped', reason: 'ja-page' };
             }
         }
 
@@ -288,14 +360,16 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
                 contentLogger.info('翻訳がキャンセルされました');
                 showStatusBadge('⏹ キャンセル', 'cancelled');
                 setTimeout(() => hideStatusBadge(), 2000);
-                return;
+                return { outcome: 'cancelled' };
             }
 
             // 全バッチ完了後にまとめてDOM更新
+            let failedBatchCount = 0;
             for (let i = 0; i < batchResults.length; i++) {
                 const result = batchResults[i];
                 if (result?.status !== 'fulfilled' || !result.value) {
                     contentLogger.error(`バッチ${i}翻訳失敗`);
+                    failedBatchCount++;
                     continue;
                 }
                 const { batch, translatedTexts } = result.value;
@@ -304,14 +378,19 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
                     // 同一テキストを持つ全ノードに翻訳を適用
                     const nodes = textToNodes.get(batch[j].text) || [batch[j]];
                     for (const { node } of nodes) {
-                        if (translated && translated !== node.textContent) {
-                            const originalText = node.textContent;
-                            state.originalTexts.set(node, originalText);
-                            node.textContent = translated;
+                        if (!translated) continue;
+                        const origFull = node.textContent;
+                        // 前後の空白（インデント・改行など）を保持して翻訳を適用
+                        const leadingWS = origFull.match(/^\s*/)[0];
+                        const trailingWS = origFull.match(/\s*$/)[0];
+                        const newText = leadingWS + translated + trailingWS;
+                        if (newText !== origFull) {
+                            state.originalTexts.set(node, origFull);
+                            node.textContent = newText;
                             const parent = node.parentElement;
                             if (parent) {
                                 parent.classList.add('llm-translated');
-                                parent.setAttribute('data-original-text', originalText);
+                                parent.setAttribute('data-original-text', origFull);
                                 state.translatedElements.add(parent);
                             }
                         }
@@ -325,6 +404,20 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
                 }
             }
 
+            if (failedBatchCount > 0) {
+                if (processed > 0) {
+                    state.isTranslated = true;
+                    startMutationObserver(targetLang, batchMaxChars);
+                }
+                const msg =
+                    processed === 0
+                        ? `全${failedBatchCount}バッチの翻訳に失敗しました`
+                        : `一部の翻訳に失敗しました（${failedBatchCount}/${batchResults.length}バッチ）。成功したブロックのみ反映されています`;
+                showStatusBadge('⚠️ 一部失敗', 'error');
+                setTimeout(() => hideStatusBadge(), 4000);
+                throw new Error(msg);
+            }
+
             state.isTranslated = true;
             showStatusBadge('✅ 翻訳完了', 'done');
             setTimeout(() => hideStatusBadge(), 3000);
@@ -332,6 +425,8 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
             // 翻訳完了後に動的コンテンツを監視開始（Ajax・無限スクロール対応）
             startMutationObserver(targetLang, batchMaxChars);
+
+            return { outcome: 'completed' };
         } catch (error) {
             showStatusBadge('❌ エラー', 'error');
             setTimeout(() => hideStatusBadge(), 3000);
@@ -389,8 +484,9 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
     function acceptMutationNode(node) {
         if (!node.parentElement) return false;
         if (SKIP_TAGS.has(node.parentElement.tagName)) return false;
+        if (node.parentElement.closest('pre, code')) return false;
         if (node.parentElement.closest('[contenteditable="true"]')) return false;
-        if (node.parentElement.classList.contains('llm-translate-tooltip')) return false;
+        if (node.parentElement.id === 'llm-translate-tooltip') return false;
         if (node.parentElement.id === 'llm-translate-badge') return false;
         if (state.originalTexts.has(node)) return false; // 既翻訳ノードはスキップ
 
@@ -406,7 +502,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         // 翻訳バッジや独自要素は除外
         if (rootNode.nodeType === Node.ELEMENT_NODE) {
             if (rootNode.id === 'llm-translate-badge') return;
-            if (rootNode.classList.contains('llm-translate-tooltip')) return;
+            if (rootNode.id === 'llm-translate-tooltip') return;
         }
 
         if (rootNode.nodeType === Node.TEXT_NODE) {
@@ -475,17 +571,22 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
                     const { node } = batch[i];
                     if (!node.isConnected) continue; // DOM から切り離されていたらスキップ
 
-                    const originalText = node.textContent;
                     const translated = translatedTexts[i];
+                    if (!translated) continue;
 
-                    if (translated && translated !== originalText) {
-                        state.originalTexts.set(node, originalText);
-                        node.textContent = translated;
+                    const origFull = node.textContent;
+                    const leadingWS = origFull.match(/^\s*/)[0];
+                    const trailingWS = origFull.match(/\s*$/)[0];
+                    const newText = leadingWS + translated + trailingWS;
+
+                    if (newText !== origFull) {
+                        state.originalTexts.set(node, origFull);
+                        node.textContent = newText;
 
                         const parent = node.parentElement;
                         if (parent) {
                             parent.classList.add('llm-translated');
-                            parent.setAttribute('data-original-text', originalText);
+                            parent.setAttribute('data-original-text', origFull);
                             state.translatedElements.add(parent);
                         }
                     }
@@ -600,6 +701,13 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
      */
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.type === 'START_TRANSLATION') {
+            if (state.isTranslating) {
+                sendResponse({ success: true, alreadyTranslating: true });
+                return false;
+            }
+
+            sendResponse({ success: true, started: true });
+
             translatePage(message.targetLang, message.batchMaxChars, (current, total) => {
                 safeSendMessage({
                     type: 'TRANSLATION_PROGRESS',
@@ -607,20 +715,23 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
                     total
                 }).catch(() => { });
             })
-                .then(() => {
-                    sendResponse({ success: true });
-                    safeSendMessage({
-                        type: 'TRANSLATION_COMPLETE'
-                    }).catch(() => { });
+                .then((result) => {
+                    const o = result?.outcome;
+                    if (o === 'completed') {
+                        safeSendMessage({ type: 'TRANSLATION_COMPLETE' }).catch(() => { });
+                    } else if (o === 'skipped') {
+                        safeSendMessage({ type: 'TRANSLATION_SKIPPED', reason: result.reason }).catch(() => { });
+                    } else if (o === 'cancelled') {
+                        safeSendMessage({ type: 'TRANSLATION_CANCELLED' }).catch(() => { });
+                    }
                 })
                 .catch(error => {
-                    sendResponse({ success: false, error: error.message });
                     safeSendMessage({
                         type: 'TRANSLATION_ERROR',
                         error: error.message
                     }).catch(() => { });
                 });
-            return true;
+            return false;
         }
 
         if (message.type === 'CANCEL_TRANSLATION') {

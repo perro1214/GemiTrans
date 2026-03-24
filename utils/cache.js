@@ -99,7 +99,12 @@ export async function checkBatchCache(texts, targetLang) {
             const key = makeCacheKey(texts[i], targetLang);
             const entry = cache[key];
             if (entry && entry.original === texts[i] && entry.lang === targetLang) {
-                cached.set(i, entry.translated);
+                // 旧 [SEP] バッチ形式の汚染エントリを自動無効化
+                if (entry.translated.includes('[SEP]') && !texts[i].includes('[SEP]')) {
+                    uncached.push(i);
+                } else {
+                    cached.set(i, entry.translated);
+                }
             } else {
                 uncached.push(i);
             }
