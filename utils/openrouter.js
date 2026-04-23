@@ -1,44 +1,22 @@
 /**
- * Gemini API クライアント
- * テキスト翻訳のためのAPI通信を担当
+ * OpenRouter API クライアント
+ * OpenAI互換APIで各種モデルを呼び出す
  */
 
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-const DEFAULT_MODEL = 'gemini-2.0-flash';
+const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1/chat/completions';
+export const DEFAULT_MODEL = 'google/gemma-4-31b-it:free';
 
 // リトライ設定
 const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY = 1000; // 1秒
+const RETRY_BASE_DELAY = 1000;
 const RETRYABLE_STATUS_CODES = [429, 500, 503];
 const REQUEST_TIMEOUT_MS = 30000;
 
 // バッチ設定
-const MAX_BATCH_CHARS = 3000; // バッチあたり最大文字数
-
-// 絵文字マスキング: 翻訳前に絵文字をプレースホルダーに置換して保護する
-const EMOJI_MASK_RE = /[\u{1F000}-\u{1FFFF}\u{20000}-\u{2FFFF}\u2600-\u27BF\u2B00-\u2BFF\uFE00-\uFE0F\u20E3\u200D\u{1F3FB}-\u{1F3FF}]+/gu;
-
-function maskEmojis(text) {
-  const map = [];
-  const masked = text.replace(EMOJI_MASK_RE, match => {
-    const token = `\uE000${map.length}\uE001`;
-    map.push(match);
-    return token;
-  });
-  return { masked, map };
-}
-
-function unmaskEmojis(text, map) {
-  if (map.length === 0) return text;
-  return text.replace(/\uE000(\d+)\uE001/g, (_, i) => map[+i] ?? _);
-}
+const MAX_BATCH_CHARS = 3000;
 
 /**
  * 指数バックオフ付きリトライでfetchを実行する
- * @param {string} url
- * @param {RequestInit} options
- * @param {number} maxRetries
- * @returns {Promise<Response>}
  */
 async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
   let lastError;
@@ -59,7 +37,6 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
         return response;
       }
 
-      // リトライ可能なステータスコードかチェック
       if (RETRYABLE_STATUS_CODES.includes(response.status) && attempt < maxRetries) {
         const delay = RETRY_BASE_DELAY * Math.pow(2, attempt);
         const retryAfter = response.headers.get('Retry-After');
@@ -68,15 +45,13 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
         continue;
       }
 
-      // リトライ不可のエラー
       const errorData = await response.json().catch(() => ({}));
-      const errorMessage = errorData?.error?.message || response.statusText || `モデルが見つかりません（${response.status}）`;
-      throw new Error(`Gemini API Error (${response.status}): ${errorMessage}`);
+      const errorMessage = errorData?.error?.message || response.statusText;
+      throw new Error(`OpenRouter API Error (${response.status}): ${errorMessage}`);
     } catch (error) {
       clearTimeout(timeoutId);
       lastError = error;
 
-      // ネットワークエラーの場合もリトライ
       if ((error.name === 'TypeError' || error.name === 'AbortError') && attempt < maxRetries) {
         const delay = RETRY_BASE_DELAY * Math.pow(2, attempt);
         await new Promise(resolve => setTimeout(resolve, delay));
@@ -84,7 +59,7 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
       }
 
       if (error.name === 'AbortError') {
-        throw new Error(`Gemini API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+        throw new Error(`OpenRouter API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
       }
 
       throw error;
@@ -95,75 +70,45 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
 }
 
 /**
- * Gemini APIを使用してテキストを翻訳する
- * @param {string} text - 翻訳するテキスト
- * @param {string} targetLang - 翻訳先の言語
- * @param {string} apiKey - Gemini API キー
- * @param {string} [model] - 使用するモデル名
- * @param {Function|null} [onUsage]
- * @param {{role?: string, pageContext?: {title?: string, hostname?: string, pageLang?: string}|null}} [options]
- * @returns {Promise<string>} 翻訳されたテキスト
+ * OpenRouter APIリクエストを送信する
  */
-export async function translateText(text, targetLang, apiKey, model = DEFAULT_MODEL, onUsage = null, options = {}) {
-  if (!text || !text.trim()) {
-    return text;
-  }
-
-  const url = `${GEMINI_API_BASE}/${model}:generateContent?key=${apiKey}`;
-
-  const { masked, map } = maskEmojis(text);
-  const prompt = buildTranslationPrompt(masked, targetLang, options);
-
-  const requestBody = {
-    contents: [
-      {
-        parts: [
-          {
-            text: prompt
-          }
-        ]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      topP: 0.95,
-      maxOutputTokens: 8192
-    }
+async function callOpenRouter(apiKey, model, prompt, onUsage = null) {
+  const body = {
+    model,
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.1,
+    max_tokens: 8192
   };
 
-  const response = await fetchWithRetry(url, {
+  const response = await fetchWithRetry(OPENROUTER_API_BASE, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+      'X-Title': 'GemiTrans'
     },
-    body: JSON.stringify(requestBody)
+    body: JSON.stringify(body)
   });
 
   const data = await response.json();
 
-  if (!data.candidates || data.candidates.length === 0) {
-    throw new Error('Gemini APIから応答がありませんでした');
-  }
-
-  const translatedText = data.candidates[0]?.content?.parts?.[0]?.text;
-
-  if (!translatedText) {
-    throw new Error('翻訳結果の取得に失敗しました');
-  }
-
-  if (onUsage && data.usageMetadata) {
+  if (onUsage && data.usage) {
     onUsage({
-      inputTokens: data.usageMetadata.promptTokenCount || 0,
-      outputTokens: data.usageMetadata.candidatesTokenCount || 0
+      inputTokens: data.usage.prompt_tokens || 0,
+      outputTokens: data.usage.completion_tokens || 0
     });
   }
 
-  return unmaskEmojis(stripLeadingRoleParen(translatedText.trim()), map);
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('OpenRouter APIから応答がありませんでした');
+  }
+
+  return content;
 }
 
 /**
- * ページ文脈（タイトル・ドメイン・html lang）をプロンプトのヘッダー行に整形する。
- * 何も無いときは空文字列を返す。
+ * ページ文脈をヘッダー行に整形する
  */
 function buildContextBlock(pageContext) {
   if (!pageContext) return '';
@@ -179,8 +124,7 @@ function buildContextBlock(pageContext) {
 }
 
 /**
- * モデルが出力に "(h1) 翻訳" のように role ヒントを残してしまった場合に備えた後処理。
- * 単純な `(識別子)` だけを先頭から剥がし、本文の括弧は壊さない。
+ * モデルが "(h1) 翻訳" のように role ヒントを残してしまった場合の後処理
  */
 function stripLeadingRoleParen(s) {
   if (!s) return s;
@@ -188,11 +132,10 @@ function stripLeadingRoleParen(s) {
 }
 
 /**
- * 翻訳用のプロンプトを構築する
- * @param {string} text - 翻訳するテキスト
- * @param {string} targetLang - 翻訳先の言語
+ * 翻訳用プロンプトを構築する
+ * @param {string} text
+ * @param {string} targetLang
  * @param {{role?: string, pageContext?: object|null}} [options]
- * @returns {string} プロンプト文字列
  */
 function buildTranslationPrompt(text, targetLang, options = {}) {
   const contextBlock = buildContextBlock(options.pageContext);
@@ -225,9 +168,7 @@ ${text}`;
 }
 
 /**
- * バッチ翻訳用プロンプトを構築する（番号付きフォーマット + role ヒント）
- * 番号付きの方が Gemini が構造を崩しにくく、役割を (paren) で添えることで
- * "ヘッドライン調 / ボタン調 / 本文" のトーンをモデルに意識させる。
+ * バッチ翻訳用プロンプトを構築する（role ヒント付き）
  */
 function buildBatchPrompt(texts, targetLang, options = {}) {
   const contextBlock = buildContextBlock(options.pageContext);
@@ -270,10 +211,6 @@ ${numbered}`;
 
 /**
  * 番号付きフォーマットのレスポンスをパースする
- * 複数行にまたがる翻訳も正しく収集する
- * @param {string} responseText
- * @param {number} expectedCount
- * @returns {Array<string|null>} パース結果（取得できなかった項目はnull）
  */
 function parseBatchResponse(responseText, expectedCount) {
   const results = new Array(expectedCount).fill(null);
@@ -303,10 +240,21 @@ function parseBatchResponse(responseText, expectedCount) {
 }
 
 /**
+ * OpenRouter APIを使用してテキストを翻訳する
+ * @param {{role?: string, pageContext?: object|null}} [options]
+ */
+export async function translateText(text, targetLang, apiKey, model = DEFAULT_MODEL, onUsage = null, options = {}) {
+  if (!text || !text.trim()) {
+    return text;
+  }
+
+  const prompt = buildTranslationPrompt(text, targetLang, options);
+  const result = await callOpenRouter(apiKey, model, prompt, onUsage);
+  return stripLeadingRoleParen(result.trim());
+}
+
+/**
  * テキストの配列を文字数ベースで動的にバッチ分割する
- * @param {string[]} texts - テキストの配列
- * @param {number} maxChars - バッチあたりの最大文字数
- * @returns {string[][]} バッチに分割されたテキスト配列
  */
 export function splitIntoBatches(texts, maxChars = MAX_BATCH_CHARS) {
   const batches = [];
@@ -314,7 +262,7 @@ export function splitIntoBatches(texts, maxChars = MAX_BATCH_CHARS) {
   let currentLength = 0;
 
   for (const text of texts) {
-    const textLength = text.length + 7; // [SEP] の長さを加算
+    const textLength = text.length + 7;
 
     if (currentBatch.length > 0 && currentLength + textLength > maxChars) {
       batches.push(currentBatch);
@@ -335,12 +283,6 @@ export function splitIntoBatches(texts, maxChars = MAX_BATCH_CHARS) {
 
 /**
  * テキストの配列をバッチで翻訳する
- * 番号付きフォーマットで一括送信し、パースできなかった項目のみ並列で個別翻訳する
- * @param {string[]} texts - 翻訳するテキストの配列
- * @param {string} targetLang - 翻訳先の言語
- * @param {string} apiKey - Gemini API キー
- * @param {string} [model] - 使用するモデル名
- * @returns {Promise<string[]>} 翻訳されたテキストの配列
  */
 export async function translateBatch(texts, targetLang, apiKey, model = DEFAULT_MODEL, onUsage = null, options = {}) {
   if (!texts || texts.length === 0) return [];
@@ -348,51 +290,21 @@ export async function translateBatch(texts, targetLang, apiKey, model = DEFAULT_
   const roles = Array.isArray(options.roles) ? options.roles : [];
   const pageContext = options.pageContext || null;
 
-  // 1件のみの場合は通常翻訳
   if (texts.length === 1) {
     try {
       return [await translateText(texts[0], targetLang, apiKey, model, onUsage, {
-        role: roles[0],
-        pageContext
+        role: roles[0], pageContext
       })];
     } catch (e) {
-      // エラー時は null を返し、呼び出し側で処理させる
       return [null];
     }
   }
 
-  const url = `${GEMINI_API_BASE}/${model}:generateContent?key=${apiKey}`;
-
-  // 各テキストの絵文字をマスクしてからバッチプロンプトを構築
-  const emojiMasks = texts.map(t => maskEmojis(t));
-  const maskedTexts = emojiMasks.map(m => m.masked);
-
   try {
-    // 番号付きフォーマットでバッチリクエスト
-    const response = await fetchWithRetry(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: buildBatchPrompt(maskedTexts, targetLang, { roles, pageContext }) }] }],
-        generationConfig: { temperature: 0.1, topP: 0.95, maxOutputTokens: 8192 }
-      })
-    });
+    const prompt = buildBatchPrompt(texts, targetLang, { roles, pageContext });
+    const responseText = await callOpenRouter(apiKey, model, prompt, onUsage);
+    const parsed = parseBatchResponse(responseText, texts.length);
 
-    const data = await response.json();
-
-    if (onUsage && data.usageMetadata) {
-      onUsage({
-        inputTokens: data.usageMetadata.promptTokenCount || 0,
-        outputTokens: data.usageMetadata.candidatesTokenCount || 0
-      });
-    }
-
-    const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const parsed = parseBatchResponse(responseText, texts.length).map(
-      (r, i) => r !== null ? unmaskEmojis(r, emojiMasks[i].map) : null
-    );
-
-    // パースできなかった項目だけ並列で個別翻訳（直列フォールバックを廃止）
     const missIndices = parsed.reduce((acc, r, i) => {
       if (r === null) acc.push(i);
       return acc;
@@ -413,7 +325,6 @@ export async function translateBatch(texts, targetLang, apiKey, model = DEFAULT_
     return parsed;
 
   } catch (e) {
-    // バッチリクエスト自体が失敗した場合も並列で個別翻訳
     return Promise.all(texts.map(async (text, i) => {
       try {
         return await translateText(text, targetLang, apiKey, model, onUsage, {
@@ -426,9 +337,6 @@ export async function translateBatch(texts, targetLang, apiKey, model = DEFAULT_
 
 /**
  * APIキーの有効性をテストする
- * @param {string} apiKey - テストするAPIキー
- * @param {string} [model] - 使用するモデル名
- * @returns {Promise<boolean>} 有効な場合true
  */
 export async function testApiKey(apiKey, model) {
   try {

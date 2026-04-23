@@ -1,18 +1,23 @@
 {
   "manifest_version": 3,
-  "name": "AI Page Translator - Gemini",
+  "name": "AI Page Translator",
   "version": "1.1.0",
-  "description": "Gemini AIを使用してウェブページを翻訳するChrome拡張機能",
+  "description": "複数のLLMプロバイダーを使用してウェブページを翻訳するChrome拡張機能",
   "permissions": [
     "activeTab",
     "storage",
+    "unlimitedStorage",
     "scripting",
     "tabs",
     "contextMenus",
     "webNavigation"
   ],
   "host_permissions": [
-    "https://generativelanguage.googleapis.com/*"
+    "https://generativelanguage.googleapis.com/*",
+    "https://openrouter.ai/*",
+    "https://api.sambanova.ai/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "background/background.js",

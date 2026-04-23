@@ -1,11 +1,86 @@
 /**
  * Background Service Worker
- * Content Script と Gemini API 間の通信を中継する
+ * Content Script と各種翻訳API 間の通信を中継する
  */
 
-import { translateBatch, testApiKey } from '../utils/gemini.js';
+import { translateBatch as geminiTranslateBatch, testApiKey as geminiTestApiKey } from '../utils/gemini.js';
+import { translateBatch as openrouterTranslateBatch, testApiKey as openrouterTestApiKey } from '../utils/openrouter.js';
+import { translateBatch as lmstudioTranslateBatch, testApiKey as lmstudioTestApiKey } from '../utils/lmstudio.js';
+import { translateBatch as sambanovaTranslateBatch, testApiKey as sambanovaTestApiKey } from '../utils/sambanova.js';
 import { logger, getLogs, clearLogs } from '../utils/logger.js';
-import { checkBatchCache, saveBatchToCache, clearCache } from '../utils/cache.js';
+import { checkBatchCache, saveBatchToCache, clearCache, clearSiteCache, getCacheSiteList } from '../utils/cache.js';
+
+/**
+ * プロバイダーに応じた翻訳関数を返す
+ */
+function getTranslateBatch(provider) {
+  if (provider === 'openrouter') return openrouterTranslateBatch;
+  if (provider === 'lmstudio') return lmstudioTranslateBatch;
+  if (provider === 'sambanova') return sambanovaTranslateBatch;
+  return geminiTranslateBatch;
+}
+
+function getTestApiKey(provider) {
+  if (provider === 'openrouter') return openrouterTestApiKey;
+  if (provider === 'lmstudio') return lmstudioTestApiKey;
+  if (provider === 'sambanova') return sambanovaTestApiKey;
+  return geminiTestApiKey;
+}
+
+function normalizeProvider(provider) {
+    if (provider === 'groq' || provider === 'cerebras') return 'gemini';
+    return provider || 'gemini';
+}
+
+function resolveBatchMaxChars(value) {
+    return typeof value === 'number' ? value : 3000;
+}
+
+async function cleanupRemovedProviderSettings() {
+    const result = await settingsStorage.get([
+        'apiProvider',
+        'groqApiKey',
+        'groqModel',
+        'cerebrasApiKey',
+        'cerebrasModel'
+    ]);
+
+    const updates = {};
+    const removeKeys = [];
+    const normalizedProvider = normalizeProvider(result.apiProvider);
+
+    if ((result.apiProvider === 'groq' || result.apiProvider === 'cerebras') && normalizedProvider !== result.apiProvider) {
+        updates.apiProvider = normalizedProvider;
+    }
+
+    if (result.groqApiKey !== undefined) removeKeys.push('groqApiKey');
+    if (result.groqModel !== undefined) removeKeys.push('groqModel');
+    if (result.cerebrasApiKey !== undefined) removeKeys.push('cerebrasApiKey');
+    if (result.cerebrasModel !== undefined) removeKeys.push('cerebrasModel');
+
+    if (removeKeys.length > 0) {
+        await settingsStorage.remove(removeKeys);
+    }
+    if (Object.keys(updates).length > 0) {
+        await settingsStorage.set(updates);
+    }
+}
+
+/**
+ * 現在のプロバイダー設定から翻訳に必要なクレデンシャル/エンドポイントを取得する
+ * 値が空の場合は undefined を返す
+ */
+async function getActiveProviderCredential() {
+    await cleanupRemovedProviderSettings();
+    const s = await settingsStorage.get([
+        'apiProvider', 'apiKey', 'openrouterApiKey', 'lmstudioEndpoint', 'sambanovaApiKey'
+    ]);
+    const provider = normalizeProvider(s.apiProvider);
+    if (provider === 'openrouter') return s.openrouterApiKey || undefined;
+    if (provider === 'lmstudio') return (s.lmstudioEndpoint || 'http://localhost:1234');
+    if (provider === 'sambanova') return s.sambanovaApiKey || undefined;
+    return s.apiKey || undefined;
+}
 
 const settingsStorage = chrome.storage.local;
 
@@ -13,15 +88,52 @@ const settingsStorage = chrome.storage.local;
 const memoryCache = new Map();
 const MEMORY_CACHE_MAX = 5000;
 
+/**
+ * LM Studio 呼び出し用の直列化ミューテックス
+ *
+ * TranslateGemma は文脈を考慮した翻訳が強みなので、1 バッチをできるだけ大きく
+ * 送って 1 リクエストで翻訳させるのが最もスループットが高い。
+ * ローカル推論は 1 モデル = 1 パイプラインのため、複数バッチを並列で投げても
+ * 同時実行は出来ず GPU/CPU 上でコンテキストスイッチが起きて遅くなるだけ。
+ * そこで content.js が 3 並列で TRANSLATE を送ってきても、ここで直列化する。
+ */
+let lmstudioMutex = Promise.resolve();
+function withLMStudioMutex(task) {
+    const next = lmstudioMutex.then(task, task);
+    lmstudioMutex = next.catch(() => { });
+    return next;
+}
+
 // API使用量ストレージキー
 const USAGE_STORAGE_KEY = 'apiUsage';
 
 // モデル料金テーブル ($/1M tokens, Paid Tier)
 const MODEL_PRICING = {
+    // Gemini
     'gemini-2.0-flash':              { input: 0.10,  output: 0.40  },
     'gemini-2.0-flash-lite':         { input: 0.075, output: 0.30  },
     'gemini-2.5-pro-preview-05-06':  { input: 1.25,  output: 10.00 },
     'gemini-3.1-flash-lite-preview': { input: 0.25,  output: 1.50  },
+    // OpenRouter 無料モデル
+    'google/gemma-4-31b-it:free':              { input: 0,    output: 0     },
+    'google/gemma-4-26b-a4b-it:free':          { input: 0,    output: 0     },
+    'nvidia/nemotron-3-super-120b-a12b:free':  { input: 0,    output: 0     },
+    'minimax/minimax-m2.5:free':               { input: 0,    output: 0     },
+    // OpenRouter Google Gemini
+    'google/gemini-3.1-flash-lite-preview':    { input: 0.25, output: 1.50  },
+    'google/gemini-3-flash-preview':           { input: 0.50, output: 3.00  },
+    'google/gemini-3.1-pro-preview':           { input: 2.00, output: 12.00 },
+    // OpenRouter OpenAI
+    'openai/gpt-5.4-nano':                     { input: 0.20, output: 1.25  },
+    'openai/gpt-5.4-mini':                     { input: 0.75, output: 4.50  },
+    'openai/gpt-5.4':                          { input: 2.50, output: 15.00 },
+    // OpenRouter Anthropic
+    'anthropic/claude-sonnet-4.6':             { input: 3.00, output: 15.00 },
+    'anthropic/claude-opus-4.6':               { input: 5.00, output: 25.00 },
+    // LM Studio (ローカル実行なのでコスト 0)
+    'translategemma-4b-it':                    { input: 0,    output: 0     },
+    'translategemma-12b-it':                   { input: 0,    output: 0     },
+    'translategemma-27b-it':                   { input: 0,    output: 0     },
 };
 
 /**
@@ -57,41 +169,90 @@ async function recordUsage(model, inputTokens, outputTokens) {
 
 /**
  * メモリキャッシュ用のキーを生成する（ハッシュ＋プレフィックスで衝突防止）
+ * 末尾に "|host" を付与し、サイト別削除時にフィルタ可能にする
  */
-function makeMemoryCacheKey(text, targetLang) {
+function makeMemoryCacheKey(text, targetLang, host) {
     let hash = 0;
     const str = text + '|' + targetLang;
     for (let i = 0; i < str.length; i++) {
         hash = ((hash << 5) - hash) + str.charCodeAt(i);
         hash |= 0;
     }
-    return hash + ':' + str.slice(0, 20);
+    const fingerprint = text.slice(0, 16) + '|' + text.slice(-16);
+    return `${hash}:${fingerprint}|${(host || '_unknown').toLowerCase()}`;
+}
+
+/**
+ * キャッシュ対象として有効な訳文か
+ * null をキャッシュすると以後ずっと「ヒットしているのに未翻訳」の状態になるため弾く。
+ */
+function isValidTranslatedText(value) {
+    return typeof value === 'string' && value.length > 0;
 }
 
 // コンテキストメニューの作成
+// 入力欄向けには言語選択サブメニューを提供する
+const INPUT_TRANSLATE_LANGUAGES = [
+    { id: 'English', label: '🇺🇸 English' },
+    { id: '日本語', label: '🇯🇵 日本語' },
+    { id: '中文', label: '🇨🇳 中文' },
+    { id: '한국어', label: '🇰🇷 한국어' },
+    { id: 'Français', label: '🇫🇷 Français' },
+    { id: 'Deutsch', label: '🇩🇪 Deutsch' },
+    { id: 'Español', label: '🇪🇸 Español' },
+    { id: 'Português', label: '🇧🇷 Português' },
+    { id: 'Italiano', label: '🇮🇹 Italiano' },
+    { id: 'Русский', label: '🇷🇺 Русский' }
+];
+
 chrome.runtime.onInstalled.addListener(() => {
     if (!chrome.contextMenus?.create) return;
 
+    // 通常テキスト選択用（ページ翻訳先言語で翻訳）
     chrome.contextMenus.create({
         id: 'translate-selection',
         title: '選択テキストを翻訳',
         contexts: ['selection']
     });
+
+    // 入力欄向け: 言語選択サブメニュー付き
+    chrome.contextMenus.create({
+        id: 'translate-input-parent',
+        title: '選択テキストを翻訳',
+        contexts: ['editable']
+    });
+    for (const lang of INPUT_TRANSLATE_LANGUAGES) {
+        chrome.contextMenus.create({
+            id: `translate-input-${lang.id}`,
+            parentId: 'translate-input-parent',
+            title: `${lang.label} に翻訳`,
+            contexts: ['editable']
+        });
+    }
 });
 
 // Safari iOS など、未実装APIがあるブラウザでも Service Worker が落ちないようにガードする
 if (chrome.contextMenus?.onClicked) {
     chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-        if (info.menuItemId !== 'translate-selection' || !tab?.id) return;
+        if (!tab?.id) return;
+
+        // 入力欄向け言語選択メニュー
+        let targetLangOverride = null;
+        if (info.menuItemId.startsWith?.('translate-input-')) {
+            targetLangOverride = info.menuItemId.replace('translate-input-', '');
+        } else if (info.menuItemId !== 'translate-selection') {
+            return;
+        }
 
         try {
-            const settings = await settingsStorage.get(['apiKey', 'targetLang', 'batchMaxChars']);
-            if (!settings.apiKey) {
-                await logger.warn('background', 'コンテキストメニュー: APIキー未設定');
+            const credential = await getActiveProviderCredential();
+            if (!credential) {
+                await logger.warn('background', 'コンテキストメニュー: APIキー/エンドポイント未設定');
                 return;
             }
-            const targetLang = settings.targetLang || '日本語';
-            const batchMaxChars = settings.batchMaxChars || 3000;
+            const settings = await settingsStorage.get(['targetLang', 'batchMaxChars']);
+            const targetLang = targetLangOverride || settings.targetLang || '日本語';
+            const batchMaxChars = resolveBatchMaxChars(settings.batchMaxChars);
 
             // Content script を注入（必要であれば）
             await ensureContentScript(tab.id);
@@ -119,13 +280,14 @@ if (chrome.commands?.onCommand) {
             if (!tab?.id) return;
             if (tab.url?.startsWith('chrome://') || tab.url?.startsWith('chrome-extension://')) return;
 
-            const settings = await settingsStorage.get(['apiKey', 'targetLang', 'batchMaxChars']);
-            if (!settings.apiKey) {
-                await logger.warn('background', 'ショートカット: APIキー未設定');
+            const credential = await getActiveProviderCredential();
+            if (!credential) {
+                await logger.warn('background', 'ショートカット: APIキー/エンドポイント未設定');
                 return;
             }
+            const settings = await settingsStorage.get(['targetLang', 'batchMaxChars']);
             const targetLang = settings.targetLang || '日本語';
-            const batchMaxChars = settings.batchMaxChars || 3000;
+            const batchMaxChars = resolveBatchMaxChars(settings.batchMaxChars);
 
             await logger.info('background', `ショートカットで翻訳開始: ${tab.url}`);
 
@@ -206,11 +368,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'CLEAR_CACHE') {
-        clearCache()
+        const host = message.host; // undefined なら全削除
+        const clearFn = host ? clearSiteCache(host) : clearCache();
+        clearFn
             .then(() => {
-                memoryCache.clear();
+                if (host) {
+                    // サイト別削除: そのサイトに関連するメモリキャッシュのみ削除
+                    for (const [key] of memoryCache) {
+                        if (key.endsWith('|' + host)) memoryCache.delete(key);
+                    }
+                } else {
+                    memoryCache.clear();
+                }
                 sendResponse({ success: true });
             })
+            .catch(e => sendResponse({ success: false, error: e.message }));
+        return true;
+    }
+
+    if (message.type === 'GET_CACHE_SITES') {
+        getCacheSiteList()
+            .then(sites => sendResponse({ success: true, sites }))
             .catch(e => sendResponse({ success: false, error: e.message }));
         return true;
     }
@@ -234,28 +412,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  */
 async function handleTranslate(message, sender, sendResponse) {
     try {
-        const { texts, targetLang } = message;
+        const { texts, targetLang, roles, pageContext, host } = message;
+        await cleanupRemovedProviderSettings();
 
-        const settings = await settingsStorage.get(['apiKey', 'model', 'verboseLog']);
-        const apiKey = settings.apiKey;
-        const model = settings.model || 'gemini-2.0-flash';
+        const settings = await settingsStorage.get([
+            'apiKey', 'openrouterApiKey', 'apiProvider', 'model', 'openrouterModel',
+            'lmstudioEndpoint', 'lmstudioModel', 'lmstudioSourceLang', 'sambanovaApiKey', 'sambanovaModel',
+            'verboseLog'
+        ]);
+        const provider = normalizeProvider(settings.apiProvider);
         const verboseLog = !!settings.verboseLog;
 
+        let apiKey, model;
+        if (provider === 'openrouter') {
+            apiKey = settings.openrouterApiKey;
+            model = settings.openrouterModel || 'google/gemini-2.0-flash-exp:free';
+        } else if (provider === 'lmstudio') {
+            apiKey = settings.lmstudioEndpoint || 'http://localhost:1234';
+            model = settings.lmstudioModel || 'translategemma-4b-it';
+        } else if (provider === 'sambanova') {
+            apiKey = settings.sambanovaApiKey;
+            model = settings.sambanovaModel || 'DeepSeek-V3.1';
+        } else {
+            apiKey = settings.apiKey;
+            model = settings.model || 'gemini-2.0-flash';
+        }
+
         if (!apiKey) {
-            const err = 'APIキーが設定されていません。ポップアップから設定してください。';
+            const err = provider === 'lmstudio'
+                ? 'LM Studio のエンドポイントが設定されていません。'
+                : 'APIキーが設定されていません。ポップアップから設定してください。';
             await logger.error('background', err);
             sendResponse({ success: false, error: err });
             return;
         }
 
+        const lmstudioSourceLang = settings.lmstudioSourceLang || 'en';
+
         // 1層目: メモリキャッシュチェック（I/Oなし・最速）
         const memoryCached = new Map(); // index -> translated
         const memoryMissIndices = [];
         for (let i = 0; i < texts.length; i++) {
-            const key = makeMemoryCacheKey(texts[i], targetLang);
-            if (memoryCache.has(key)) {
-                memoryCached.set(i, memoryCache.get(key));
+            const key = makeMemoryCacheKey(texts[i], targetLang, host);
+            const cachedValue = memoryCache.get(key);
+            if (isValidTranslatedText(cachedValue)) {
+                memoryCached.set(i, cachedValue);
             } else {
+                if (memoryCache.has(key)) memoryCache.delete(key);
                 memoryMissIndices.push(i);
             }
         }
@@ -268,7 +471,7 @@ async function handleTranslate(message, sender, sendResponse) {
         let storageUncachedIndices = memoryMissIndices;
         if (memoryMissIndices.length > 0) {
             const memoryMissTexts = memoryMissIndices.map(i => texts[i]);
-            const { cached: storageCacheResult, uncached } = await checkBatchCache(memoryMissTexts, targetLang);
+            const { cached: storageCacheResult, uncached } = await checkBatchCache(memoryMissTexts, targetLang, host);
             if (storageCacheResult.size > 0) {
                 await logger.info('background', `ストレージキャッシュヒット: ${storageCacheResult.size}/${memoryMissTexts.length}件`);
             }
@@ -280,8 +483,8 @@ async function handleTranslate(message, sender, sendResponse) {
             for (const [localIdx, translated] of storageCacheResult) {
                 const originalIdx = memoryMissIndices[localIdx];
                 storageCached.set(originalIdx, translated);
-                const key = makeMemoryCacheKey(texts[originalIdx], targetLang);
-                if (memoryCache.size < MEMORY_CACHE_MAX) {
+                const key = makeMemoryCacheKey(texts[originalIdx], targetLang, host);
+                if (isValidTranslatedText(translated) && memoryCache.size < MEMORY_CACHE_MAX) {
                     memoryCache.set(key, translated);
                 }
             }
@@ -292,29 +495,52 @@ async function handleTranslate(message, sender, sendResponse) {
         let apiTranslations = [];
         if (storageUncachedIndices.length > 0) {
             const uncachedTexts = storageUncachedIndices.map(i => texts[i]);
-            await logger.info('background', `翻訳開始: ${uncachedTexts.length}件, 言語=${targetLang}, モデル=${model}`);
+            const uncachedRoles = Array.isArray(roles)
+                ? storageUncachedIndices.map(i => roles[i] || 'body')
+                : undefined;
+            await logger.info('background', `翻訳開始: ${uncachedTexts.length}件, 言語=${targetLang}, プロバイダー=${provider}, モデル=${model}`);
             const apiStartTime = Date.now();
-            apiTranslations = await translateBatch(uncachedTexts, targetLang, apiKey, model, (usage) => {
-                recordUsage(model, usage.inputTokens, usage.outputTokens);
-            });
+            const translateBatch = getTranslateBatch(provider);
+            const onUsage = (usage) => recordUsage(model, usage.inputTokens, usage.outputTokens);
+            const promptOptions = { roles: uncachedRoles, pageContext: pageContext || null };
+            if (provider === 'lmstudio') {
+                // ローカル推論のバッチを直列化して 1 リクエスト = 1 推論を徹底する
+                apiTranslations = await withLMStudioMutex(() =>
+                    translateBatch(uncachedTexts, targetLang, apiKey, model, onUsage, lmstudioSourceLang, promptOptions)
+                );
+            } else {
+                apiTranslations = await translateBatch(uncachedTexts, targetLang, apiKey, model, onUsage, promptOptions);
+            }
             const apiElapsed = Date.now() - apiStartTime;
 
-            if (verboseLog) {
-                const avgMs = uncachedTexts.length > 0 ? Math.round(apiElapsed / uncachedTexts.length) : 0;
-                await logger.info('background', `API応答: ${apiElapsed}ms (${uncachedTexts.length}件, 平均${avgMs}ms/件)`, `モデル=${model}, 言語=${targetLang}`);
+            const avgMs = uncachedTexts.length > 0 ? Math.round(apiElapsed / uncachedTexts.length) : 0;
+            const nullCount = apiTranslations.filter(t => t === null).length;
+            if (nullCount > 0) {
+                await logger.warn('background', `翻訳失敗: ${nullCount}/${apiTranslations.length}件がnull (プロバイダー=${provider}, モデル=${model})`);
             }
+            await logger.info(
+                'background',
+                `API応答: ${apiElapsed}ms (${uncachedTexts.length}件, 平均${avgMs}ms/件) プロバイダー=${provider}`,
+                `モデル=${model}, 言語=${targetLang}`
+            );
 
             // API結果をメモリキャッシュに保存
             for (let j = 0; j < storageUncachedIndices.length; j++) {
-                const key = makeMemoryCacheKey(texts[storageUncachedIndices[j]], targetLang);
-                if (memoryCache.size < MEMORY_CACHE_MAX) {
-                    memoryCache.set(key, apiTranslations[j]);
+                const key = makeMemoryCacheKey(texts[storageUncachedIndices[j]], targetLang, host);
+                const translated = apiTranslations[j];
+                if (isValidTranslatedText(translated)) {
+                    if (memoryCache.size < MEMORY_CACHE_MAX) {
+                        memoryCache.set(key, translated);
+                    }
+                } else if (memoryCache.has(key)) {
+                    memoryCache.delete(key);
                 }
             }
 
             // storage.local への保存は fire-and-forget（レスポンスを早く返す）
-            saveBatchToCache(uncachedTexts, targetLang, apiTranslations)
-                .then(() => logger.info('background', `キャッシュ保存完了: ${apiTranslations.length}件`))
+            const savedCount = apiTranslations.filter(isValidTranslatedText).length;
+            saveBatchToCache(uncachedTexts, targetLang, apiTranslations, host)
+                .then(() => logger.info('background', `キャッシュ保存完了: ${savedCount}件`))
                 .catch(e => logger.error('background', `キャッシュ保存エラー: ${e.message}`));
         }
 
@@ -327,8 +553,17 @@ async function handleTranslate(message, sender, sendResponse) {
             } else if (storageCached.has(i)) {
                 translatedTexts[i] = storageCached.get(i);
             } else {
-                translatedTexts[i] = apiTranslations[apiIdx++];
+                const translated = apiTranslations[apiIdx++];
+                translatedTexts[i] = isValidTranslatedText(translated) ? translated : null;
             }
+        }
+
+        const translatedCount = translatedTexts.filter(isValidTranslatedText).length;
+        if (translatedCount === 0) {
+            const err = `${provider} から有効な翻訳結果を取得できませんでした（モデル=${model}）`;
+            await logger.error('background', err);
+            sendResponse({ success: false, error: err });
+            return;
         }
 
         sendResponse({ success: true, translatedTexts });
@@ -343,9 +578,11 @@ async function handleTranslate(message, sender, sendResponse) {
  */
 async function handleTestApiKey(message, sendResponse) {
     try {
-        const { apiKey, model } = message;
-        await logger.info('background', `APIキーテスト開始 (モデル: ${model || 'default'})`);
-        const isValid = await testApiKey(apiKey, model);
+        const { apiKey, model, provider } = message;
+        const normalizedProvider = normalizeProvider(provider);
+        await logger.info('background', `APIキーテスト開始 (プロバイダー: ${normalizedProvider}, モデル: ${model || 'default'})`);
+        const testFn = getTestApiKey(normalizedProvider);
+        const isValid = await testFn(apiKey, model);
         await logger.info('background', `APIキーテスト結果: ${isValid ? '有効' : '無効'}`);
         sendResponse({ success: true, isValid });
     } catch (error) {
@@ -359,6 +596,7 @@ async function handleTestApiKey(message, sendResponse) {
  */
 async function handleGetSettings(sendResponse) {
     try {
+        await cleanupRemovedProviderSettings();
         const settings = await settingsStorage.get(['apiKey', 'targetLang', 'model']);
         sendResponse({ success: true, settings });
     } catch (error) {
@@ -433,11 +671,13 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
     if (details.frameId !== 0) return;
 
     try {
-        const settings = await settingsStorage.get(['apiKey', 'targetLang', 'autoTranslate', 'batchMaxChars']);
-        if (!settings.autoTranslate || !settings.apiKey) return;
+        const settings = await settingsStorage.get(['targetLang', 'autoTranslate', 'batchMaxChars']);
+        if (!settings.autoTranslate) return;
+        const credential = await getActiveProviderCredential();
+        if (!credential) return;
 
         const targetLang = settings.targetLang || '日本語';
-        const batchMaxChars = settings.batchMaxChars || 3000;
+        const batchMaxChars = resolveBatchMaxChars(settings.batchMaxChars);
 
         await logger.info('background', `SPA遷移検知: ${details.url}`);
 
@@ -464,12 +704,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) return;
 
     try {
-        const settings = await settingsStorage.get(['apiKey', 'targetLang', 'model', 'autoTranslate', 'batchMaxChars']);
+        const settings = await settingsStorage.get(['targetLang', 'model', 'autoTranslate', 'batchMaxChars']);
 
-        if (!settings.autoTranslate || !settings.apiKey) return;
+        if (!settings.autoTranslate) return;
+        const credential = await getActiveProviderCredential();
+        if (!credential) return;
 
         const targetLang = settings.targetLang || '日本語';
-        const batchMaxChars = settings.batchMaxChars || 3000;
+        const batchMaxChars = resolveBatchMaxChars(settings.batchMaxChars);
 
         await logger.info('background', `自動翻訳開始: ${tab.url}`);
 

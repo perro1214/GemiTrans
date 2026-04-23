@@ -42,14 +42,29 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         isTranslating: false,
         isTranslated: false,
         isCancelled: false,
-        originalTexts: new Map(), // node -> originalText
-        translatedElements: new Set()
+        originalTexts: new Map(), // node -> originalText（元テキスト復元用／翻訳済みノード識別用）
+        translatedElements: new Set(),
+        /**
+         * 翻訳結果のコンテンツスクリプト側キャッシュ。
+         * React/Vue 等が同じ原文のテキストノードを再生成した際、API 往復なしで
+         * 即座に再適用できるようにする。キーは trim 済みの原文。
+         */
+        translatedTextCache: new Map()
     };
 
     // MutationObserver 関連（動的コンテンツ監視）
     let mutationObserver = null;
     let mutationDebounceTimer = null;
-    const pendingMutationNodes = new Map(); // node -> text のバッファ（重複防止）
+    let mutationFirstPendingAt = 0; // 連続ミューテーション発生時の debounce 上限計算用
+    const pendingMutationNodes = new Map(); // node -> {text, role} のバッファ（重複防止）
+    /** @type {WeakSet<ShadowRoot>} body および各 open shadow root へ observer を一本化するための登録済みセット */
+    let observedShadowRoots = new WeakSet();
+
+    // 動的コンテンツの debounce 設定
+    // React などが高頻度で再レンダーするサイトでは連続 mutation で debounce が永遠にリセット
+    // されてしまうため、初回 pending から MUTATION_DEBOUNCE_MAX_MS を超えたら強制的に flush する。
+    const MUTATION_DEBOUNCE_MS = 500;
+    const MUTATION_DEBOUNCE_MAX_MS = 1500;
 
     // 翻訳対象外のタグ
     const SKIP_TAGS = new Set([
@@ -62,28 +77,199 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
     // 最小テキスト長（これ以下は翻訳しない）
     const MIN_TEXT_LENGTH = 2;
 
+    // 翻訳不要パターン: 数値・パーセント・通貨・時刻・日付・スコアなどのみで構成されるテキスト
+    // 例: "0%", "$12.50", "3:45", "98/100", "1,234", "+5", "−3.2", "12:30:00"
+    const NUMERIC_ONLY_RE = /^[\s\d%$€¥£₩.,/:;\-+−×xX*#()\[\]{}°℃℉]+$/;
+
+    // 翻訳不要判定: Unicode の「文字（letter）」を一切含まない場合はスキップ。
+    // 絵文字・記号・矢印・アイコンフォント文字・< > などを列挙せずに網羅できる。
+    const HAS_LETTER_RE = /\p{L}/u;
+
+    // 高頻度で更新される要素を追跡するためのカウンタ
+    // parentElement -> { count, firstSeen }
+    const volatileNodeTracker = new Map();
+    const VOLATILE_WINDOW_MS = 3000;   // この期間内に
+    const VOLATILE_THRESHOLD = 3;       // この回数以上変化したら揮発性と判定
+    let volatileCleanupTimer = null;
+
+    /**
+     * 翻訳プロンプトに「そのページが何か」を伝えるためのメタ情報を作る。
+     * タイトルとドメインと html lang を渡しておくと、翻訳モデルが
+     * トーン（マーケ/技術/ニュースなど）や固有名詞の扱いを安定させやすい。
+     * @returns {{title: string, hostname: string, pageLang: string}}
+     */
+    function getPageContext() {
+        try {
+            const title = (document.title || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+            const hostname = (location?.hostname || '').slice(0, 120);
+            const pageLang = (document.documentElement?.lang || '').trim().slice(0, 16);
+            return { title, hostname, pageLang };
+        } catch {
+            return { title: '', hostname: '', pageLang: '' };
+        }
+    }
+
+    /**
+     * テキストノードがどんな「役割」でページに置かれているかを 1 語で分類する。
+     * バッチプロンプトで各項目に (role) を付けてモデルに渡すことで、
+     * 見出しらしさ・ボタンらしさ・本文らしさ・リンクらしさを保持した翻訳を促す。
+     *
+     * 粒度を粗くしているのは、モデルが余計に解釈しすぎないようにするため。
+     * @param {Text} textNode
+     * @returns {string}
+     */
+    const BLOCK_ROLE_MAP = {
+        H1: 'h1', H2: 'h2', H3: 'h3', H4: 'h4', H5: 'h5', H6: 'h6',
+        BUTTON: 'button',
+        A: 'link',
+        LABEL: 'label',
+        LI: 'list-item',
+        STRONG: 'emphasis', B: 'emphasis', EM: 'emphasis', I: 'emphasis', MARK: 'emphasis',
+        BLOCKQUOTE: 'quote', Q: 'quote',
+        CAPTION: 'caption', FIGCAPTION: 'caption',
+        TH: 'table-header', TD: 'table-cell',
+        DT: 'term', DD: 'definition',
+        SUMMARY: 'summary',
+        CITE: 'citation',
+        CODE: 'code',
+        P: 'body'
+    };
+
+    // UIグループ検出: ドロップダウン・メニュー・タブ等の選択肢群にグループIDを付与
+    // 同一コンテナ要素 → 同一 groupId で、プロンプト上で「まとまり」として認識させる
+    const GROUP_CONTAINER_SELECTORS = [
+        '[role="listbox"]',
+        '[role="menu"]',
+        '[role="menubar"]',
+        '[role="tablist"]',
+        '[role="radiogroup"]',
+        'select',
+        'ul[class*="dropdown"]', 'ul[class*="select"]', 'ul[class*="menu"]',
+        'div[class*="dropdown"]', 'div[class*="select-menu"]', 'div[class*="listbox"]',
+        '[data-radix-popper-content-wrapper]',
+        '[class*="MuiMenu"]', '[class*="MuiSelect"]', '[class*="MuiList"]'
+    ].join(', ');
+
+    const uiGroupMap = new WeakMap(); // container element → groupId
+    let uiGroupSeq = 0;
+
+    /**
+     * テキストノードがUIグループ（ドロップダウン等）に属している場合、そのグループIDを返す。
+     * @param {Element} parentEl
+     * @returns {string|null} グループ識別子（例: "group-1"）
+     */
+    function getUIGroupId(parentEl) {
+        // option 要素は親 select がグループ
+        const option = parentEl.closest('option');
+        if (option) {
+            const sel = option.closest('select');
+            if (sel) return assignGroupId(sel);
+        }
+        // role="option" / role="menuitem" / role="tab" はグループコンテナの子
+        const ariaRole = (parentEl.getAttribute('role') || '').toLowerCase();
+        if (ariaRole === 'option' || ariaRole === 'menuitem' || ariaRole === 'tab') {
+            const container = parentEl.closest(GROUP_CONTAINER_SELECTORS);
+            if (container) return assignGroupId(container);
+        }
+        // LI 内のテキストでグループコンテナ直下ならグループ扱い
+        const li = parentEl.closest('li');
+        if (li) {
+            const container = li.parentElement?.closest(GROUP_CONTAINER_SELECTORS);
+            if (container) return assignGroupId(container);
+        }
+        // 汎用: グループコンテナ直下の要素
+        const container = parentEl.closest(GROUP_CONTAINER_SELECTORS);
+        if (container) return assignGroupId(container);
+        return null;
+    }
+
+    function assignGroupId(containerEl) {
+        if (uiGroupMap.has(containerEl)) return uiGroupMap.get(containerEl);
+        const id = `group-${++uiGroupSeq}`;
+        uiGroupMap.set(containerEl, id);
+        return id;
+    }
+
+    function getRoleForNode(textNode) {
+        const parent = textNode.parentElement;
+        if (!parent) return 'body';
+
+        // UIグループ検出（ドロップダウン・メニュー・タブ等）
+        const groupId = getUIGroupId(parent);
+        if (groupId) {
+            // グループ内の基本ロールを決定
+            const ariaRole = (parent.getAttribute('role') || '').toLowerCase();
+            let itemRole = 'option';
+            if (ariaRole === 'menuitem') itemRole = 'menu-item';
+            else if (ariaRole === 'tab') itemRole = 'tab';
+            else if (parent.closest('[role="tab"]')) itemRole = 'tab';
+            else if (parent.closest('[role="menuitem"]')) itemRole = 'menu-item';
+            return `${itemRole}@${groupId}`;
+        }
+
+        // ARIA role を優先（div でもボタンやヘディングとして振る舞うケースがある）
+        const ariaHost = parent.closest('[role]');
+        if (ariaHost) {
+            const r = (ariaHost.getAttribute('role') || '').toLowerCase();
+            if (r === 'button') return 'button';
+            if (r === 'heading') return 'heading';
+            if (r === 'link') return 'link';
+            if (r === 'menuitem') return 'menu-item';
+            if (r === 'tab') return 'tab';
+            if (r === 'navigation') return 'nav';
+        }
+
+        // input[type=submit|button] のようなフォーム要素
+        if (parent.closest('button')) return 'button';
+
+        // 祖先を辿って一番内側のブロック種別を採用
+        let el = parent;
+        while (el && el !== document.body) {
+            const tag = el.tagName;
+            if (BLOCK_ROLE_MAP[tag]) return BLOCK_ROLE_MAP[tag];
+            if (tag === 'NAV') return 'nav';
+            if (tag === 'HEADER') return 'header';
+            if (tag === 'FOOTER') return 'footer';
+            if (tag === 'ASIDE') return 'aside';
+            el = el.parentElement;
+        }
+        return 'body';
+    }
+
     /**
      * ページの言語を検出する
      * @returns {'ja' | 'other' | 'unknown'}
+     * @remarks html lang は「UI 言語」だけ ja にされ本文が英語、というサイトがある（例: platform.openai.com）。
+     *          そのため lang 単体ではなく、本文サンプルの文字種を優先する。
      */
     function detectPageLanguage() {
-        // HTML lang属性を最優先で確認
-        const lang = document.documentElement.lang?.toLowerCase() || '';
-        if (lang.startsWith('ja')) return 'ja';
-
-        // メタタグの content-language を確認
-        const metaLang = document.querySelector('meta[http-equiv="content-language"]')?.content?.toLowerCase() || '';
-        if (metaLang.startsWith('ja')) return 'ja';
-
-        // ページ冒頭テキストで日本語文字（ひらがな・カタカナ・漢字）の比率を計算
-        const sampleText = (document.body?.innerText || '').slice(0, 500);
-        if (!sampleText) return 'unknown';
+        const sampleText = (document.body?.innerText || '').slice(0, 2000);
+        if (!sampleText.trim()) return 'unknown';
 
         const japaneseChars = (sampleText.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]/g) || []).length;
-        const ratio = japaneseChars / sampleText.length;
+        const latinLetters = (sampleText.match(/[a-zA-Z]/g) || []).length;
+        const len = sampleText.length;
+        const jaRatio = japaneseChars / len;
 
-        // 10%以上が日本語文字であれば日本語ページと判定
-        return ratio > 0.1 ? 'ja' : 'other';
+        // 冒頭テキストが主にラテン文字なら英語等とみなす（lang=ja-JP でもスキップしない）
+        if (latinLetters >= 60 && jaRatio < 0.06 && japaneseChars < latinLetters * 0.12) {
+            return 'other';
+        }
+
+        // 日本語文字が十分多ければ日本語ページ
+        if (jaRatio > 0.1) return 'ja';
+
+        // html lang / meta が日本向けだが、本文に日本語が少しはあるケース
+        const lang = document.documentElement.lang?.toLowerCase() || '';
+        const metaLang = document.querySelector('meta[http-equiv="content-language"]')?.content?.toLowerCase() || '';
+        if ((lang.startsWith('ja') || metaLang.startsWith('ja')) && jaRatio > 0.03) {
+            return 'ja';
+        }
+
+        // 英語混在の日本語コンテンツ（比率だけでは lang ほど出ない）
+        if (jaRatio > 0.05) return 'ja';
+
+        return 'other';
     }
 
     /**
@@ -192,42 +378,85 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
     }
 
     /**
-     * ページ内の翻訳対象テキストノードを収集する
+     * TreeWalker 用: テキストノードを翻訳対象とするか
+     * @param {Text} node
+     * @returns {boolean}
+     */
+    function isTranslatableTextNode(node) {
+        if (!node.parentElement) return false;
+        if (SKIP_TAGS.has(node.parentElement.tagName)) return false;
+        if (node.parentElement.closest('pre, code')) return false;
+        if (node.parentElement.closest('[contenteditable="true"]')) return false;
+        if (node.parentElement.id === 'llm-translate-tooltip') return false;
+        if (node.parentElement.id === 'llm-translate-badge') return false;
+        // notranslate クラスまたは translate="no" 属性を持つ祖先はスキップ
+        if (node.parentElement.closest('.notranslate, [translate="no"]')) return false;
+        // aria-hidden="true" の要素はスクリーンリーダーから隠されており翻訳不要
+        if (node.parentElement.closest('[aria-hidden="true"]')) return false;
+        // role="presentation" / "none" は装飾要素
+        const role = node.parentElement.closest('[role]')?.getAttribute('role');
+        if (role === 'presentation' || role === 'none') return false;
+        // Material Icons / Google Symbols / Font Awesome などアイコンフォントのクラスはスキップ
+        const el = node.parentElement.closest('[class]');
+        if (el) {
+            const cls = el.className;
+            if (/\b(material-icons?|material-symbols?[-\w]*|google-symbols?|fa[srbldc]?\s|glyphicon|bi\s|codicon)\b/.test(cls)) return false;
+        }
+        const text = node.textContent.trim();
+        if (text.length < MIN_TEXT_LENGTH) return false;
+        // 数値・パーセント・通貨のみで構成されるテキストは翻訳不要
+        if (NUMERIC_ONLY_RE.test(text)) return false;
+        // 翻訳可能な文字（letter）を含まない場合はスキップ（絵文字・記号・アイコン等を網羅）
+        if (!HAS_LETTER_RE.test(text)) return false;
+        // aria-live や role="timer" など、リアルタイム更新される領域はスキップ
+        const liveAncestor = node.parentElement.closest('[aria-live], [role="timer"], [role="status"], [role="progressbar"]');
+        if (liveAncestor) {
+            const ariaLive = liveAncestor.getAttribute('aria-live');
+            // aria-live="polite" は通知用途なのでスキップ、"off" は対象外
+            if (ariaLive === 'assertive' || ariaLive === 'polite') return false;
+            const role = liveAncestor.getAttribute('role');
+            if (role === 'timer' || role === 'progressbar') return false;
+        }
+        return true;
+    }
+
+    /**
+     * document / ShadowRoot など単一ツリー内のテキストを収集し、子の open shadow も再帰する
+     * @param {Node} root  document.body または ShadowRoot など
      * @returns {Array<{node: Text, text: string}>}
      */
-    function collectTextNodes() {
+    function collectTextNodesInTree(root) {
         const textNodes = [];
         const walker = document.createTreeWalker(
-            document.body,
+            root,
             NodeFilter.SHOW_TEXT,
             {
                 acceptNode(node) {
-                    if (!node.parentElement) return NodeFilter.FILTER_REJECT;
-                    if (SKIP_TAGS.has(node.parentElement.tagName)) return NodeFilter.FILTER_REJECT;
-                    // code/pre の子孫もスキップ（シンタックスハイライト用 <span> を含む）
-                    if (node.parentElement.closest('pre, code')) return NodeFilter.FILTER_REJECT;
-                    if (node.parentElement.closest('[contenteditable="true"]')) return NodeFilter.FILTER_REJECT;
-                    if (node.parentElement.id === 'llm-translate-tooltip') return NodeFilter.FILTER_REJECT;
-                    if (node.parentElement.id === 'llm-translate-badge') return NodeFilter.FILTER_REJECT;
-
-                    const text = node.textContent.trim();
-                    if (!text || text.length < MIN_TEXT_LENGTH) return NodeFilter.FILTER_REJECT;
-
-                    return NodeFilter.FILTER_ACCEPT;
+                    return isTranslatableTextNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
                 }
             }
         );
-
         let node;
         while ((node = walker.nextNode())) {
-            textNodes.push({
-                node,
-                // trim したものをAPIに送るが、前後空白は node.textContent から復元する
-                text: node.textContent.trim()
-            });
+            textNodes.push({ node, text: node.textContent.trim(), role: getRoleForNode(node) });
         }
-
+        const elWalker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
+        let el;
+        while ((el = elWalker.nextNode())) {
+            if (el.shadowRoot) {
+                textNodes.push(...collectTextNodesInTree(el.shadowRoot));
+            }
+        }
         return textNodes;
+    }
+
+    /**
+     * ページ内の翻訳対象テキストノードを収集する（open Shadow DOM を含む）
+     * @returns {Array<{node: Text, text: string}>}
+     */
+    function collectTextNodes() {
+        if (!document.body) return [];
+        return collectTextNodesInTree(document.body);
     }
 
     /**
@@ -257,6 +486,160 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
         }
 
         return chunks;
+    }
+
+    /**
+     * 翻訳結果を 1 つのテキストノードに適用する共通処理。
+     * 先頭/末尾の空白（インデント・改行）を保持しながら置換し、マーカーを付与する。
+     * @param {Text} node
+     * @param {string} translated - 翻訳後テキスト（trim 済み）
+     * @param {string} [expectedOriginal] - 翻訳リクエスト時の原文（trim 済み）。
+     *   指定された場合、ノードの現在テキストが変化していたら適用をスキップする。
+     *   動的サイトで API 応答が返るまでにテキストが変わった場合の誤上書きを防ぐ。
+     * @returns {boolean} DOM を書き換えた場合 true
+     */
+    function applyTranslationToNode(node, translated, expectedOriginal) {
+        if (!node || !node.isConnected) return false;
+        if (!translated) return false;
+        const origFull = node.textContent;
+
+        // 翻訳リクエスト時の原文が指定されている場合、現在テキストと照合
+        if (expectedOriginal !== undefined) {
+            const currentTrimmed = origFull.trim();
+            if (currentTrimmed !== expectedOriginal) {
+                contentLogger.warn(
+                    `原文変化を検出、翻訳適用をスキップ: ` +
+                    `"${expectedOriginal.slice(0, 40)}…" → "${currentTrimmed.slice(0, 40)}…"`
+                );
+                return false;
+            }
+        }
+
+        const leadingWS = origFull.match(/^\s*/)[0];
+        const trailingWS = origFull.match(/\s*$/)[0];
+        const newText = leadingWS + translated + trailingWS;
+        if (newText === origFull) return false;
+
+        state.originalTexts.set(node, origFull);
+        node.textContent = newText;
+        const parent = node.parentElement;
+        if (parent) {
+            parent.classList.add('llm-translated');
+            parent.setAttribute('data-original-text', origFull);
+            state.translatedElements.add(parent);
+        }
+        return true;
+    }
+
+    /**
+     * translatedTextCache にヒットする項目を同期的に DOM へ反映し、残った未翻訳のみ返す。
+     * React 等の再レンダーで原文に戻されたノードを、API 往復を待たずに復元するための高速パス。
+     * @param {Iterable<{node: Text, text: string}>} items
+     * @returns {Array<{node: Text, text: string}>} キャッシュヒットしなかった項目
+     */
+    function applyCachedTranslations(items) {
+        const remaining = [];
+        for (const item of items) {
+            const { node, text } = item;
+            if (!node.isConnected) continue;
+            if (state.originalTexts.has(node)) continue; // 既に翻訳済み（重複処理防止）
+            const translated = state.translatedTextCache.get(text);
+            if (translated) {
+                applyTranslationToNode(node, translated);
+            } else {
+                remaining.push(item);
+            }
+        }
+        return remaining;
+    }
+
+    /**
+     * 現在の DOM 全体から翻訳対象を再収集し、キャッシュにあるものは即時反映、
+     * ないものは API で翻訳してキャッシュと DOM へ反映する。
+     *
+     * 初回翻訳中に React 等がハイドレーション／再レンダーでノードを差し替えた結果、
+     * 翻訳結果の適用先ノードが DOM から外れてしまって「ほとんど翻訳されない」現象が
+     * 発生するため、初回バッチ完了後にこの再スキャンで取りこぼしを回収する。
+     *
+     * @param {string} targetLang
+     * @param {number} batchMaxChars
+     * @param {{maxApiBatches?: number}} [opts]
+     * @returns {Promise<{cachedApplied: number, apiApplied: number, apiCalls: number}>}
+     */
+    async function reconcileDomWithCache(targetLang, batchMaxChars, opts = {}) {
+        const maxApiBatches = typeof opts.maxApiBatches === 'number' ? opts.maxApiBatches : Infinity;
+        const fresh = collectTextNodes();
+        const untranslated = fresh.filter(({ node }) => !state.originalTexts.has(node));
+        if (untranslated.length === 0) {
+            return { cachedApplied: 0, apiApplied: 0, apiCalls: 0 };
+        }
+
+        // ステップ1: キャッシュから即時反映（同期）
+        let cachedApplied = 0;
+        const needsApi = [];
+        for (const item of untranslated) {
+            if (!item.node.isConnected) continue;
+            if (state.originalTexts.has(item.node)) continue;
+            const cached = state.translatedTextCache.get(item.text);
+            if (cached) {
+                if (applyTranslationToNode(item.node, cached)) cachedApplied++;
+            } else {
+                needsApi.push(item);
+            }
+        }
+
+        if (needsApi.length === 0 || maxApiBatches <= 0 || state.isCancelled) {
+            return { cachedApplied, apiApplied: 0, apiCalls: 0 };
+        }
+
+        // ステップ2: API 未問い合わせの項目をまとめて送る（重複送信しないようにユニーク化）
+        const textToNodes = new Map();
+        for (const item of needsApi) {
+            if (!textToNodes.has(item.text)) textToNodes.set(item.text, []);
+            textToNodes.get(item.text).push(item);
+        }
+        const uniqueItems = [...textToNodes.keys()].map((text) => {
+            const first = textToNodes.get(text)[0];
+            return { node: first.node, text, role: first.role || 'body' };
+        });
+
+        const maxChars = batchMaxChars === 0 ? Infinity : batchMaxChars;
+        let batches = chunkByChars(uniqueItems, maxChars);
+        if (Number.isFinite(maxApiBatches)) batches = batches.slice(0, maxApiBatches);
+
+        const pageContext = getPageContext();
+        const CONCURRENCY_LIMIT = 3;
+        const results = await runWithConcurrency(batches, CONCURRENCY_LIMIT, async (batch) => {
+            if (state.isCancelled) return null;
+            const texts = batch.map((item) => item.text);
+            const roles = batch.map((item) => item.role || 'body');
+            const response = await safeSendMessage({
+                type: 'TRANSLATE', texts, roles, pageContext, targetLang, host: location.hostname
+            });
+            if (!response.success) throw new Error(response.error);
+            return { batch, translatedTexts: response.translatedTexts };
+        });
+
+        let apiApplied = 0;
+        for (const res of results) {
+            if (res?.status !== 'fulfilled' || !res.value) continue;
+            const { batch, translatedTexts } = res.value;
+            for (let j = 0; j < batch.length; j++) {
+                const translated = translatedTexts[j];
+                if (!translated) {
+                    // null の場合は訳文未取得。API 失敗だけでなく未キャッシュ/無効キャッシュも含む。
+                    contentLogger.warn(`再スキャン時に翻訳結果なし: "${batch[j].text.slice(0, 50)}..."`);
+                    continue;
+                }
+                state.translatedTextCache.set(batch[j].text, translated);
+                const nodes = textToNodes.get(batch[j].text) || [batch[j]];
+                for (const { node } of nodes) {
+                    if (applyTranslationToNode(node, translated, batch[j].text)) apiApplied++;
+                }
+            }
+        }
+
+        return { cachedApplied, apiApplied, apiCalls: batches.length };
     }
 
     /**
@@ -316,8 +699,15 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
         showStatusBadge('🔄 翻訳中...', 'translating');
 
+        const startTime = performance.now();
+        let collectElapsed = 0;
+        let apiElapsed = 0;
+        let domElapsed = 0;
+
         try {
+            const collectStart = performance.now();
             const allTextNodes = collectTextNodes();
+            collectElapsed = performance.now() - collectStart;
 
             // デデュープ: テキスト → ノード群のマップ（同一テキストは1回だけAPIに送信）
             const textToNodes = new Map();
@@ -327,10 +717,10 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             }
 
             // ユニークなテキストのみバッチ処理
-            const uniqueItems = [...textToNodes.keys()].map(text => ({
-                node: textToNodes.get(text)[0].node,
-                text
-            }));
+            const uniqueItems = [...textToNodes.keys()].map(text => {
+                const first = textToNodes.get(text)[0];
+                return { node: first.node, text, role: first.role || 'body' };
+            });
             const total = uniqueItems.length;
 
             contentLogger.info(`テキストノード収集完了: ${allTextNodes.length}件 (ユニーク: ${total}件)`);
@@ -346,14 +736,20 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
             const CONCURRENCY_LIMIT = 3;
 
+            const pageContext = getPageContext();
+            const apiStart = performance.now();
             // 並列でAPIリクエストを送信
             const batchResults = await runWithConcurrency(batches, CONCURRENCY_LIMIT, async (batch) => {
                 if (state.isCancelled) return null;
                 const texts = batch.map(item => item.text);
-                const response = await safeSendMessage({ type: 'TRANSLATE', texts, targetLang });
+                const roles = batch.map(item => item.role || 'body');
+                const response = await safeSendMessage({
+                    type: 'TRANSLATE', texts, roles, pageContext, targetLang, host: location.hostname
+                });
                 if (!response.success) throw new Error(response.error);
                 return { batch, translatedTexts: response.translatedTexts };
             });
+            apiElapsed = performance.now() - apiStart;
 
             // キャンセルチェック
             if (state.isCancelled) {
@@ -364,6 +760,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             }
 
             // 全バッチ完了後にまとめてDOM更新
+            const domStart = performance.now();
             let failedBatchCount = 0;
             for (let i = 0; i < batchResults.length; i++) {
                 const result = batchResults[i];
@@ -375,25 +772,17 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
                 const { batch, translatedTexts } = result.value;
                 for (let j = 0; j < batch.length; j++) {
                     const translated = translatedTexts[j];
+                    if (!translated) {
+                        // null の場合は訳文未取得。API 失敗だけでなく無効キャッシュも含む。
+                        contentLogger.warn(`翻訳結果なし: "${batch[j].text.slice(0, 50)}..."`);
+                        continue;
+                    }
+                    // 再レンダー時の即時再適用のため、原文 → 訳文をキャッシュしておく
+                    state.translatedTextCache.set(batch[j].text, translated);
                     // 同一テキストを持つ全ノードに翻訳を適用
                     const nodes = textToNodes.get(batch[j].text) || [batch[j]];
                     for (const { node } of nodes) {
-                        if (!translated) continue;
-                        const origFull = node.textContent;
-                        // 前後の空白（インデント・改行など）を保持して翻訳を適用
-                        const leadingWS = origFull.match(/^\s*/)[0];
-                        const trailingWS = origFull.match(/\s*$/)[0];
-                        const newText = leadingWS + translated + trailingWS;
-                        if (newText !== origFull) {
-                            state.originalTexts.set(node, origFull);
-                            node.textContent = newText;
-                            const parent = node.parentElement;
-                            if (parent) {
-                                parent.classList.add('llm-translated');
-                                parent.setAttribute('data-original-text', origFull);
-                                state.translatedElements.add(parent);
-                            }
-                        }
+                        applyTranslationToNode(node, translated, batch[j].text);
                     }
                 }
                 processed += batch.length;
@@ -404,8 +793,40 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
                 }
             }
 
+            domElapsed = performance.now() - domStart;
+
+            // 再レンダー取りこぼし回収パス。
+            // React/Next.js などのハイドレーションは初回 API 応答前後に発生し、
+            // applyTranslationToNode が持つ Text ノード参照が DOM から外れてしまう結果、
+            // ユーザー視点では「ほとんど翻訳されないままのページ」になってしまうことがある。
+            // ここで DOM を再スキャンし、キャッシュに訳文があるものは即時反映、
+            // ハイドレーション後に新しく現れた未知の原文は追加 API 呼び出しで補う。
+            // 進行中ハイドレーションを拾うため、短い間隔で最大3パス試みる。
+            // 部分失敗時も成功した訳文のキャッシュを再レンダー後の DOM に反映したいので、
+            // 失敗チェックより前に実行する。
+            const reconcileStart = performance.now();
+            let reconcileTotalCached = 0;
+            let reconcileTotalApi = 0;
+            let reconcileApiCalls = 0;
+            for (let pass = 0; pass < 3; pass++) {
+                if (state.isCancelled) break;
+                // 1回目は DOM 反映直後に素早く、2回目以降はハイドレーション完了を
+                // 待つため少し待機する。
+                if (pass > 0) await new Promise((r) => setTimeout(r, 400));
+                // 追加の API 呼び出しは累計で最大 4 バッチに制限（暴走防止）
+                const budgetLeft = Math.max(0, 4 - reconcileApiCalls);
+                const stats = await reconcileDomWithCache(targetLang, batchMaxChars, {
+                    maxApiBatches: budgetLeft
+                });
+                reconcileTotalCached += stats.cachedApplied;
+                reconcileTotalApi += stats.apiApplied;
+                reconcileApiCalls += stats.apiCalls;
+                if (stats.cachedApplied === 0 && stats.apiApplied === 0) break;
+            }
+            const reconcileElapsed = performance.now() - reconcileStart;
+
             if (failedBatchCount > 0) {
-                if (processed > 0) {
+                if (processed > 0 || reconcileTotalCached > 0 || reconcileTotalApi > 0) {
                     state.isTranslated = true;
                     startMutationObserver(targetLang, batchMaxChars);
                 }
@@ -421,7 +842,14 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             state.isTranslated = true;
             showStatusBadge('✅ 翻訳完了', 'done');
             setTimeout(() => hideStatusBadge(), 3000);
-            contentLogger.info(`翻訳完了: ${allTextNodes.length}件のテキストを翻訳しました`);
+            const totalElapsed = performance.now() - startTime;
+            contentLogger.info(
+                `翻訳完了: ${allTextNodes.length}件のテキスト / ${batches.length}バッチ ` +
+                `| 合計 ${totalElapsed.toFixed(0)}ms ` +
+                `(収集 ${collectElapsed.toFixed(0)}ms, API ${apiElapsed.toFixed(0)}ms, ` +
+                `DOM更新 ${domElapsed.toFixed(0)}ms, 再スキャン ${reconcileElapsed.toFixed(0)}ms ` +
+                `[キャッシュ復元 ${reconcileTotalCached}件 / 追加API ${reconcileTotalApi}件])`
+            );
 
             // 翻訳完了後に動的コンテンツを監視開始（Ajax・無限スクロール対応）
             startMutationObserver(targetLang, batchMaxChars);
@@ -472,6 +900,7 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
         state.originalTexts.clear();
         state.translatedElements.clear();
+        state.translatedTextCache.clear();
         state.isTranslated = false;
         hideStatusBadge();
     }
@@ -482,24 +911,55 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
      * @returns {boolean}
      */
     function acceptMutationNode(node) {
-        if (!node.parentElement) return false;
-        if (SKIP_TAGS.has(node.parentElement.tagName)) return false;
-        if (node.parentElement.closest('pre, code')) return false;
-        if (node.parentElement.closest('[contenteditable="true"]')) return false;
-        if (node.parentElement.id === 'llm-translate-tooltip') return false;
-        if (node.parentElement.id === 'llm-translate-badge') return false;
-        if (state.originalTexts.has(node)) return false; // 既翻訳ノードはスキップ
+        if (state.originalTexts.has(node)) return false;
+        if (!isTranslatableTextNode(node)) return false;
 
-        const text = node.textContent.trim();
-        return text.length >= MIN_TEXT_LENGTH;
+        // 高頻度更新ノードの検出: 同じ親要素のテキストが短期間に何度も変化している場合はスキップ
+        const parent = node.parentElement;
+        if (parent) {
+            const now = Date.now();
+            const entry = volatileNodeTracker.get(parent);
+            if (entry) {
+                if (now - entry.firstSeen < VOLATILE_WINDOW_MS) {
+                    entry.count++;
+                    if (entry.count >= VOLATILE_THRESHOLD) {
+                        return false; // 揮発性ノードとして除外
+                    }
+                } else {
+                    // ウィンドウをリセット
+                    entry.firstSeen = now;
+                    entry.count = 1;
+                }
+            } else {
+                volatileNodeTracker.set(parent, { firstSeen: now, count: 1 });
+                // 定期的にクリーンアップ
+                if (!volatileCleanupTimer) {
+                    volatileCleanupTimer = setTimeout(() => {
+                        volatileCleanupTimer = null;
+                        const cutoff = Date.now() - VOLATILE_WINDOW_MS * 2;
+                        for (const [el, e] of volatileNodeTracker) {
+                            if (e.firstSeen < cutoff) volatileNodeTracker.delete(el);
+                        }
+                    }, VOLATILE_WINDOW_MS * 3);
+                }
+            }
+        }
+
+        return true;
     }
 
     /**
-     * 追加された DOM ノードからテキストノードを収集して pendingMutationNodes に積む
+     * 追加された DOM ノードからテキストノードを収集して pendingMutationNodes に積む（Shadow DOM 含む）
      * @param {Node} rootNode
      */
     function collectFromAddedNode(rootNode) {
-        // 翻訳バッジや独自要素は除外
+        if (rootNode.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+            for (const ch of rootNode.childNodes) {
+                collectFromAddedNode(ch);
+            }
+            return;
+        }
+
         if (rootNode.nodeType === Node.ELEMENT_NODE) {
             if (rootNode.id === 'llm-translate-badge') return;
             if (rootNode.id === 'llm-translate-tooltip') return;
@@ -507,22 +967,56 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
         if (rootNode.nodeType === Node.TEXT_NODE) {
             if (acceptMutationNode(rootNode)) {
-                pendingMutationNodes.set(rootNode, rootNode.textContent.trim());
+                pendingMutationNodes.set(rootNode, {
+                    text: rootNode.textContent.trim(),
+                    role: getRoleForNode(rootNode)
+                });
             }
             return;
         }
 
         if (rootNode.nodeType !== Node.ELEMENT_NODE) return;
 
-        const walker = document.createTreeWalker(
-            rootNode,
-            NodeFilter.SHOW_TEXT,
-            { acceptNode: (node) => acceptMutationNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT }
-        );
+        function collectUnder(subRoot) {
+            const walker = document.createTreeWalker(
+                subRoot,
+                NodeFilter.SHOW_TEXT,
+                {
+                    acceptNode: (n) => (acceptMutationNode(n) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT)
+                }
+            );
+            let n;
+            while ((n = walker.nextNode())) {
+                pendingMutationNodes.set(n, {
+                    text: n.textContent.trim(),
+                    role: getRoleForNode(n)
+                });
+            }
+            const elWalker = document.createTreeWalker(subRoot, NodeFilter.SHOW_ELEMENT, null);
+            let el;
+            while ((el = elWalker.nextNode())) {
+                if (el.shadowRoot) collectUnder(el.shadowRoot);
+            }
+        }
 
-        let node;
-        while ((node = walker.nextNode())) {
-            pendingMutationNodes.set(node, node.textContent.trim());
+        collectUnder(rootNode);
+    }
+
+    /**
+     * open ShadowRoot に MutationObserver を張る（同一 shadow に二重登録しない）
+     * @param {Node} root
+     */
+    function observeOpenShadowRootsUnder(root) {
+        if (!mutationObserver || !root) return;
+        const elWalker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
+        let el;
+        while ((el = elWalker.nextNode())) {
+            const sr = el.shadowRoot;
+            if (sr && !observedShadowRoots.has(sr)) {
+                observedShadowRoots.add(sr);
+                mutationObserver.observe(sr, { childList: true, subtree: true });
+                observeOpenShadowRootsUnder(sr);
+            }
         }
     }
 
@@ -536,29 +1030,44 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
         // 接続中かつ未翻訳のノードのみに絞る
         const validItems = [];
-        for (const [node, text] of pendingMutationNodes) {
+        for (const [node, meta] of pendingMutationNodes) {
             if (node.isConnected && !state.originalTexts.has(node)) {
-                validItems.push({ node, text });
+                validItems.push({ node, text: meta.text, role: meta.role });
             }
         }
         pendingMutationNodes.clear();
 
         if (validItems.length === 0) return;
 
-        contentLogger.info(`動的コンテンツ翻訳: ${validItems.length}件`);
+        // 最初にコンテンツスクリプト内キャッシュで拾えるものを同期適用（再レンダー耐性）
+        const uncachedItems = applyCachedTranslations(validItems);
+        if (uncachedItems.length === 0) {
+            contentLogger.info(`動的コンテンツ翻訳: ${validItems.length}件すべてキャッシュヒット（API 呼び出しなし）`);
+            return;
+        }
+        if (uncachedItems.length !== validItems.length) {
+            contentLogger.info(`動的コンテンツ翻訳: ${validItems.length}件中 ${validItems.length - uncachedItems.length}件をキャッシュから適用、${uncachedItems.length}件を API へ`);
+        } else {
+            contentLogger.info(`動的コンテンツ翻訳: ${uncachedItems.length}件`);
+        }
 
         const maxChars = batchMaxChars === 0 ? Infinity : batchMaxChars;
-        const batches = chunkByChars(validItems, maxChars);
+        const batches = chunkByChars(uncachedItems, maxChars);
+        const pageContext = getPageContext();
 
         for (const batch of batches) {
             if (state.isCancelled) break;
 
             const texts = batch.map(item => item.text);
+            const roles = batch.map(item => item.role || 'body');
             try {
                 const response = await safeSendMessage({
                     type: 'TRANSLATE',
                     texts,
-                    targetLang
+                    roles,
+                    pageContext,
+                    targetLang,
+                    host: location.hostname
                 });
 
                 if (!response.success) {
@@ -568,28 +1077,11 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
 
                 const { translatedTexts } = response;
                 for (let i = 0; i < batch.length; i++) {
-                    const { node } = batch[i];
-                    if (!node.isConnected) continue; // DOM から切り離されていたらスキップ
-
                     const translated = translatedTexts[i];
                     if (!translated) continue;
-
-                    const origFull = node.textContent;
-                    const leadingWS = origFull.match(/^\s*/)[0];
-                    const trailingWS = origFull.match(/\s*$/)[0];
-                    const newText = leadingWS + translated + trailingWS;
-
-                    if (newText !== origFull) {
-                        state.originalTexts.set(node, origFull);
-                        node.textContent = newText;
-
-                        const parent = node.parentElement;
-                        if (parent) {
-                            parent.classList.add('llm-translated');
-                            parent.setAttribute('data-original-text', origFull);
-                            state.translatedElements.add(parent);
-                        }
-                    }
+                    // 以降の再レンダーで即時復元できるようキャッシュ
+                    state.translatedTextCache.set(batch[i].text, translated);
+                    applyTranslationToNode(batch[i].node, translated, batch[i].text);
                 }
             } catch (e) {
                 contentLogger.error(`動的コンテンツ翻訳エラー: ${e.message}`);
@@ -605,31 +1097,70 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
     function startMutationObserver(targetLang, batchMaxChars) {
         if (mutationObserver) return; // 既に起動中
 
+        observedShadowRoots = new WeakSet();
+
         mutationObserver = new MutationObserver((mutations) => {
             let hasNewNodes = false;
 
             for (const mutation of mutations) {
                 for (const addedNode of mutation.addedNodes) {
                     collectFromAddedNode(addedNode);
+                    if (addedNode.nodeType === Node.ELEMENT_NODE) {
+                        observeOpenShadowRootsUnder(addedNode);
+                    } else if (addedNode.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+                        for (const ch of addedNode.childNodes) {
+                            if (ch.nodeType === Node.ELEMENT_NODE) observeOpenShadowRootsUnder(ch);
+                        }
+                    }
                     if (pendingMutationNodes.size > 0) hasNewNodes = true;
                 }
             }
 
             if (!hasNewNodes) return;
 
-            // 連続する DOM 変更をまとめて処理（デバウンス 500ms）
+            // React/Vue などの再レンダーで「以前に翻訳したテキストの新しいノード」が入ってくるケースは、
+            // API 往復を待たずここで即座に復元する。こうしておかないと debounce 待ちの間に
+            // 次の再レンダーで再び消されてユーザーには「翻訳できなかった」ように見える。
+            if (state.translatedTextCache.size > 0 && pendingMutationNodes.size > 0) {
+                const snapshot = Array.from(pendingMutationNodes, ([node, meta]) => ({
+                    node, text: meta.text, role: meta.role
+                }));
+                const remaining = applyCachedTranslations(snapshot);
+                pendingMutationNodes.clear();
+                for (const item of remaining) {
+                    pendingMutationNodes.set(item.node, { text: item.text, role: item.role });
+                }
+                if (pendingMutationNodes.size === 0) {
+                    clearTimeout(mutationDebounceTimer);
+                    mutationDebounceTimer = null;
+                    mutationFirstPendingAt = 0;
+                    return;
+                }
+            }
+
+            // 連続する DOM 変更をデバウンスでまとめるが、高頻度再レンダーでも
+            // MUTATION_DEBOUNCE_MAX_MS 以内に必ず flush されるよう上限を設ける。
+            const now = Date.now();
+            if (!mutationFirstPendingAt) mutationFirstPendingAt = now;
+            const elapsed = now - mutationFirstPendingAt;
+            const remainingCap = Math.max(0, MUTATION_DEBOUNCE_MAX_MS - elapsed);
+            const delay = Math.min(MUTATION_DEBOUNCE_MS, remainingCap);
+
             clearTimeout(mutationDebounceTimer);
             mutationDebounceTimer = setTimeout(() => {
+                mutationDebounceTimer = null;
+                mutationFirstPendingAt = 0;
                 flushPendingMutations(targetLang, batchMaxChars).catch(() => { });
-            }, 500);
+            }, delay);
         });
 
         mutationObserver.observe(document.body, {
             childList: true,
             subtree: true
         });
+        observeOpenShadowRootsUnder(document.body);
 
-        contentLogger.info('MutationObserver 起動: 動的コンテンツ監視開始');
+        contentLogger.info('MutationObserver 起動: 動的コンテンツ監視開始（Shadow DOM 含む）');
     }
 
     /**
@@ -642,53 +1173,119 @@ if (window.__LLM_TRANSLATOR_LOADED__) {
             contentLogger.info('MutationObserver 停止');
         }
         clearTimeout(mutationDebounceTimer);
+        mutationDebounceTimer = null;
+        mutationFirstPendingAt = 0;
         pendingMutationNodes.clear();
+        observedShadowRoots = new WeakSet();
     }
 
     /**
-     * 選択テキストを翻訳する
+     * フォーカス中の input / textarea から選択テキスト情報を取得する。
+     * 取得できなければ null を返す。
+     * @returns {{ element: HTMLInputElement|HTMLTextAreaElement, text: string, start: number, end: number } | null}
+     */
+    function getInputSelection() {
+        const el = document.activeElement;
+        if (!el) return null;
+        const tag = el.tagName;
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA') return null;
+        // type="text" など選択可能な input のみ（number, email 等は selectionStart 非対応）
+        if (tag === 'INPUT') {
+            const selectable = new Set(['text', 'search', 'url', 'tel', 'password', '']);
+            if (!selectable.has(el.type || '')) return null;
+        }
+        try {
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            if (start == null || end == null || start === end) return null;
+            const text = el.value.slice(start, end).trim();
+            if (!text) return null;
+            return { element: el, text, start, end };
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * 選択テキストを翻訳する（通常DOM選択 / input・textarea 内選択の両方に対応）
      */
     async function translateSelection(targetLang) {
-        const selection = window.getSelection();
-        const selectedText = selection?.toString()?.trim();
+        // 1) input / textarea 内の選択を優先チェック
+        const inputSel = getInputSelection();
+        // 2) 通常の DOM 選択
+        const domSelection = window.getSelection();
+        const domSelectedText = domSelection?.toString()?.trim() || '';
+
+        const selectedText = inputSel ? inputSel.text : domSelectedText;
 
         if (!selectedText || selectedText.length < MIN_TEXT_LENGTH) {
             contentLogger.warn('選択テキストが短すぎます');
             return;
         }
 
+        const isInputMode = !!inputSel;
         showStatusBadge('🔄 翻訳中...', 'translating');
 
+        const startTime = performance.now();
+        let apiElapsed = 0;
+
         try {
+            const apiStart = performance.now();
             const response = await safeSendMessage({
                 type: 'TRANSLATE',
                 texts: [selectedText],
-                targetLang
+                roles: ['selection'],
+                pageContext: getPageContext(),
+                targetLang,
+                host: location.hostname
             });
+            apiElapsed = performance.now() - apiStart;
 
             if (!response.success) {
                 throw new Error(response.error);
             }
 
             const translated = response.translatedTexts[0];
+            const domStart = performance.now();
 
             if (translated && translated !== selectedText) {
-                // 選択範囲を翻訳結果で置換
-                const range = selection.getRangeAt(0);
-                const span = document.createElement('span');
-                span.classList.add('llm-translated');
-                span.setAttribute('data-original-text', selectedText);
-                span.textContent = translated;
+                if (isInputMode) {
+                    // input / textarea: 選択範囲を翻訳結果で置換
+                    const el = inputSel.element;
+                    const before = el.value.slice(0, inputSel.start);
+                    const after = el.value.slice(inputSel.end);
+                    el.value = before + translated + after;
+                    // カーソルを置換後テキストの末尾に置く
+                    const newEnd = inputSel.start + translated.length;
+                    el.setSelectionRange(newEnd, newEnd);
+                    // input イベントを発火させてフレームワークの状態を同期
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                } else {
+                    // 通常DOM: 選択範囲を翻訳結果の span で置換
+                    const range = domSelection.getRangeAt(0);
+                    const span = document.createElement('span');
+                    span.classList.add('llm-translated');
+                    span.setAttribute('data-original-text', selectedText);
+                    span.textContent = translated;
 
-                range.deleteContents();
-                range.insertNode(span);
-                state.translatedElements.add(span);
-                // 原文復元用に保存
-                state.originalTexts.set(span.firstChild, selectedText);
+                    range.deleteContents();
+                    range.insertNode(span);
+                    state.translatedElements.add(span);
+                    // 原文復元用に保存
+                    state.originalTexts.set(span.firstChild, selectedText);
+                }
             }
 
+            const domElapsed = performance.now() - domStart;
+            const totalElapsed = performance.now() - startTime;
             showStatusBadge('✅ 翻訳完了', 'done');
             setTimeout(() => hideStatusBadge(), 2000);
+            contentLogger.info(
+                `選択テキスト翻訳完了${isInputMode ? '(入力欄)' : ''}: ${selectedText.length}文字 ` +
+                `| 合計 ${totalElapsed.toFixed(0)}ms ` +
+                `(API ${apiElapsed.toFixed(0)}ms, DOM更新 ${domElapsed.toFixed(0)}ms)`
+            );
         } catch (error) {
             showStatusBadge('❌ エラー', 'error');
             setTimeout(() => hideStatusBadge(), 3000);

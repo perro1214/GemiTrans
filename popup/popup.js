@@ -5,12 +5,44 @@
 
 // DOM要素の取得
 const elements = {
+    apiProvider: document.getElementById('api-provider'),
+    // Gemini
+    geminiKeyField: document.getElementById('gemini-key-field'),
     apiKey: document.getElementById('api-key'),
     toggleKey: document.getElementById('toggle-key'),
     toggleIcon: document.getElementById('toggle-icon'),
     keyStatus: document.getElementById('key-status'),
-    targetLang: document.getElementById('target-lang'),
+    geminiModelField: document.getElementById('gemini-model-field'),
     modelSelect: document.getElementById('model-select'),
+    geminiRefresh: document.getElementById('gemini-refresh'),
+    // OpenRouter
+    openrouterKeyField: document.getElementById('openrouter-key-field'),
+    openrouterApiKey: document.getElementById('openrouter-api-key'),
+    toggleOpenrouterKey: document.getElementById('toggle-openrouter-key'),
+    toggleOpenrouterIcon: document.getElementById('toggle-openrouter-icon'),
+    openrouterKeyStatus: document.getElementById('openrouter-key-status'),
+    openrouterModelField: document.getElementById('openrouter-model-field'),
+    openrouterModelSelect: document.getElementById('openrouter-model-select'),
+    // SambaNova
+    sambanovaKeyField: document.getElementById('sambanova-key-field'),
+    sambanovaApiKey: document.getElementById('sambanova-api-key'),
+    toggleSambanovaKey: document.getElementById('toggle-sambanova-key'),
+    toggleSambanovaIcon: document.getElementById('toggle-sambanova-icon'),
+    sambanovaKeyStatus: document.getElementById('sambanova-key-status'),
+    sambanovaModelField: document.getElementById('sambanova-model-field'),
+    sambanovaModelSelect: document.getElementById('sambanova-model-select'),
+    sambanovaRefresh: document.getElementById('sambanova-refresh'),
+    // LM Studio
+    lmstudioEndpointField: document.getElementById('lmstudio-endpoint-field'),
+    lmstudioEndpoint: document.getElementById('lmstudio-endpoint'),
+    lmstudioKeyStatus: document.getElementById('lmstudio-key-status'),
+    lmstudioModelField: document.getElementById('lmstudio-model-field'),
+    lmstudioModelSelect: document.getElementById('lmstudio-model-select'),
+    lmstudioRefresh: document.getElementById('lmstudio-refresh'),
+    lmstudioSourceLangField: document.getElementById('lmstudio-source-lang-field'),
+    lmstudioSourceLang: document.getElementById('lmstudio-source-lang'),
+    // 共通
+    targetLang: document.getElementById('target-lang'),
     batchSize: document.getElementById('batch-size'),
     saveSettings: document.getElementById('save-settings'),
     autoTranslate: document.getElementById('auto-translate'),
@@ -31,7 +63,10 @@ const elements = {
     usageViewer: document.getElementById('usage-viewer'),
     usageContent: document.getElementById('usage-content'),
     clearUsage: document.getElementById('clear-usage'),
-    clearCache: document.getElementById('clear-cache')
+    clearCache: document.getElementById('clear-cache'),
+    cacheSitesPanel: document.getElementById('cache-sites-panel'),
+    toggleCacheSites: document.getElementById('toggle-cache-sites'),
+    cacheSitesList: document.getElementById('cache-sites-list')
 };
 
 // ログフィルター状態
@@ -44,6 +79,45 @@ const logFilter = {
 let allFetchedLogs = [];
 const settingsStorage = chrome.storage.local;
 const MESSAGE_TIMEOUT_MS = 30000;
+
+function normalizeProvider(provider) {
+    if (provider === 'groq' || provider === 'cerebras') return 'gemini';
+    return provider || 'gemini';
+}
+
+function resolveBatchMaxChars(value) {
+    return typeof value === 'number' ? value : 3000;
+}
+
+async function cleanupRemovedProviderSettings() {
+    const result = await settingsStorage.get([
+        'apiProvider',
+        'groqApiKey',
+        'groqModel',
+        'cerebrasApiKey',
+        'cerebrasModel'
+    ]);
+
+    const updates = {};
+    const removeKeys = [];
+    const normalizedProvider = normalizeProvider(result.apiProvider);
+
+    if ((result.apiProvider === 'groq' || result.apiProvider === 'cerebras') && normalizedProvider !== result.apiProvider) {
+        updates.apiProvider = normalizedProvider;
+    }
+
+    if (result.groqApiKey !== undefined) removeKeys.push('groqApiKey');
+    if (result.groqModel !== undefined) removeKeys.push('groqModel');
+    if (result.cerebrasApiKey !== undefined) removeKeys.push('cerebrasApiKey');
+    if (result.cerebrasModel !== undefined) removeKeys.push('cerebrasModel');
+
+    if (removeKeys.length > 0) {
+        await settingsStorage.remove(removeKeys);
+    }
+    if (Object.keys(updates).length > 0) {
+        await settingsStorage.set(updates);
+    }
+}
 
 // 初期化
 document.addEventListener('DOMContentLoaded', init);
@@ -64,10 +138,46 @@ async function init() {
  */
 async function loadSettings() {
     try {
-        const result = await settingsStorage.get(['apiKey', 'targetLang', 'model', 'autoTranslate', 'batchMaxChars', 'verboseLog']);
+        await cleanupRemovedProviderSettings();
+        const result = await settingsStorage.get([
+            'apiKey', 'openrouterApiKey', 'apiProvider',
+            'targetLang', 'model', 'openrouterModel', 'sambanovaApiKey', 'sambanovaModel',
+            'lmstudioEndpoint', 'lmstudioModel', 'lmstudioSourceLang',
+            'autoTranslate', 'batchMaxChars', 'verboseLog'
+        ]);
+
+        // プロバイダー設定
+        const provider = normalizeProvider(result.apiProvider);
+        elements.apiProvider.value = provider;
+        updateProviderUI(provider);
 
         if (result.apiKey) {
             elements.apiKey.value = result.apiKey;
+        }
+
+        if (result.openrouterApiKey) {
+            elements.openrouterApiKey.value = result.openrouterApiKey;
+        }
+
+        if (result.sambanovaApiKey) {
+            elements.sambanovaApiKey.value = result.sambanovaApiKey;
+        }
+
+        if (result.lmstudioEndpoint) {
+            elements.lmstudioEndpoint.value = result.lmstudioEndpoint;
+        }
+
+        if (result.lmstudioSourceLang) {
+            elements.lmstudioSourceLang.value = result.lmstudioSourceLang;
+        }
+
+        // 有効なクレデンシャルがあれば翻訳ボタンを有効化
+        let activeKey;
+        if (provider === 'openrouter') activeKey = result.openrouterApiKey;
+        else if (provider === 'sambanova') activeKey = result.sambanovaApiKey;
+        else if (provider === 'lmstudio') activeKey = result.lmstudioEndpoint || elements.lmstudioEndpoint.value;
+        else activeKey = result.apiKey;
+        if (activeKey) {
             elements.translateBtn.disabled = false;
         }
 
@@ -75,8 +185,26 @@ async function loadSettings() {
             elements.targetLang.value = result.targetLang;
         }
 
-        if (result.model && [...elements.modelSelect.options].some(o => o.value === result.model)) {
+        if (provider === 'gemini' && result.apiKey) {
+            await loadGeminiModels(result.apiKey, result.model);
+        } else if (result.model && [...elements.modelSelect.options].some(o => o.value === result.model)) {
             elements.modelSelect.value = result.model;
+        }
+
+        if (provider === 'openrouter') {
+            await loadOpenRouterModels(result.openrouterModel);
+        } else if (result.openrouterModel && [...elements.openrouterModelSelect.options].some(o => o.value === result.openrouterModel)) {
+            elements.openrouterModelSelect.value = result.openrouterModel;
+        }
+
+        if (provider === 'sambanova') {
+            await loadSambaNovaModels(result.sambanovaModel);
+        } else if (result.sambanovaModel && [...elements.sambanovaModelSelect.options].some(o => o.value === result.sambanovaModel)) {
+            elements.sambanovaModelSelect.value = result.sambanovaModel;
+        }
+
+        if (provider === 'lmstudio') {
+            await loadLMStudioModels(result.lmstudioModel);
         }
 
         if (result.batchMaxChars !== undefined) {
@@ -88,6 +216,405 @@ async function loadSettings() {
     } catch (error) {
         console.error('Failed to load settings:', error);
     }
+}
+
+/**
+ * プロバイダーに応じてUIの表示/非表示を切り替える
+ */
+function updateProviderUI(provider) {
+    const isOpenRouter = provider === 'openrouter';
+    const isSambaNova = provider === 'sambanova';
+    const isLMStudio = provider === 'lmstudio';
+    const isGemini = provider === 'gemini';
+
+    elements.geminiKeyField.classList.toggle('hidden', !isGemini);
+    elements.geminiModelField.classList.toggle('hidden', !isGemini);
+    elements.openrouterKeyField.classList.toggle('hidden', !isOpenRouter);
+    elements.openrouterModelField.classList.toggle('hidden', !isOpenRouter);
+    elements.sambanovaKeyField.classList.toggle('hidden', !isSambaNova);
+    elements.sambanovaModelField.classList.toggle('hidden', !isSambaNova);
+    elements.lmstudioEndpointField.classList.toggle('hidden', !isLMStudio);
+    elements.lmstudioModelField.classList.toggle('hidden', !isLMStudio);
+    elements.lmstudioSourceLangField.classList.toggle('hidden', !isLMStudio);
+}
+
+const GEMINI_FALLBACK_MODELS = [
+    { id: 'gemini-2.0-flash',              name: 'Gemini 2.0 Flash（高速）' },
+    { id: 'gemini-2.0-flash-lite',         name: 'Gemini 2.0 Flash Lite（最速）' },
+    { id: 'gemini-2.5-flash-preview-04-17',name: 'Gemini 2.5 Flash Preview' },
+    { id: 'gemini-2.5-pro-preview-05-06',  name: 'Gemini 2.5 Pro（高精度）' },
+];
+
+/**
+ * Gemini API からモデル一覧を取得してドロップダウンを構築する
+ */
+async function loadGeminiModels(apiKey, savedModel) {
+    const select = elements.modelSelect;
+    if (!apiKey) {
+        showKeyStatus('APIキーを入力してください', 'error');
+        return;
+    }
+
+    const btn = elements.geminiRefresh;
+    const btnText = btn?.querySelector('.btn-text');
+    if (btn) { btn.disabled = true; if (btnText) btnText.textContent = '🔄 取得中…'; }
+
+    try {
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), 10000);
+        const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=100`,
+            { signal: controller.signal }
+        );
+        clearTimeout(tid);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        const NON_TEXT_RE = /embedding|imagen|veo|aqa|tts|speech|vision-only/i;
+        const models = (data.models || [])
+            .filter(m => Array.isArray(m.supportedGenerationMethods) &&
+                         m.supportedGenerationMethods.includes('generateContent') &&
+                         !NON_TEXT_RE.test(m.name))
+            .map(m => ({
+                id: m.name.replace(/^models\//, ''),
+                name: m.displayName || m.name.replace(/^models\//, '')
+            }))
+            .sort((a, b) => a.id.localeCompare(b.id));
+
+        if (models.length === 0) throw new Error('利用可能なモデルが見つかりません');
+
+        select.innerHTML = '';
+        models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.name;
+            select.appendChild(opt);
+        });
+
+        const target = savedModel || 'gemini-2.0-flash';
+        if ([...select.options].some(o => o.value === target)) {
+            select.value = target;
+        }
+
+        showKeyStatus(`✅ ${models.length}件のモデルを取得しました`, 'success');
+    } catch (err) {
+        // フォールバック: ハードコードリストを使用
+        const currentVal = select.value;
+        if (select.options.length === 0) {
+            select.innerHTML = '';
+            GEMINI_FALLBACK_MODELS.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = m.name;
+                select.appendChild(opt);
+            });
+            const target = savedModel || 'gemini-2.0-flash';
+            if ([...select.options].some(o => o.value === target)) select.value = target;
+        } else if (currentVal) {
+            select.value = currentVal;
+        }
+        showKeyStatus(`⚠️ モデル一覧の取得に失敗: ${err.message}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; if (btnText) btnText.textContent = '🔄 APIキーでモデル一覧を取得'; }
+    }
+}
+
+/**
+ * LM Studio のモデル一覧を取得してドロップダウンを構築する
+ */
+async function loadLMStudioModels(savedModel) {
+    const select = elements.lmstudioModelSelect;
+    const endpoint = (elements.lmstudioEndpoint.value || 'http://localhost:1234').replace(/\/+$/, '');
+
+    try {
+        const response = await fetch(`${endpoint}/v1/models`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const models = (data.data || []).filter(m => (m.type === 'llm' || !m.type));
+
+        select.innerHTML = '';
+        if (models.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = 'translategemma-4b-it';
+            opt.textContent = 'translategemma-4b-it (未ロード)';
+            select.appendChild(opt);
+        } else {
+            models.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                const state = m.state ? ` [${m.state}]` : '';
+                opt.textContent = `${m.id}${state}`;
+                select.appendChild(opt);
+            });
+        }
+
+        if (savedModel && [...select.options].some(o => o.value === savedModel)) {
+            select.value = savedModel;
+        } else {
+            const tg = [...select.options].find(o => /translategemma/i.test(o.value));
+            if (tg) select.value = tg.value;
+        }
+        showLMStudioKeyStatus(`✅ ${models.length}件のモデルが見つかりました`, 'success');
+    } catch (error) {
+        select.innerHTML = '<option value="translategemma-4b-it">translategemma-4b-it</option>';
+        if (savedModel) {
+            const opt = document.createElement('option');
+            opt.value = savedModel;
+            opt.textContent = savedModel;
+            select.appendChild(opt);
+            select.value = savedModel;
+        }
+        showLMStudioKeyStatus(`⚠️ LM Studio に接続できません: ${error.message}`, 'error');
+    }
+}
+
+const SAMBANOVA_FALLBACK_MODELS = [
+    { id: 'DeepSeek-V3.1', name: 'DeepSeek-V3.1（推奨）' },
+    { id: 'Meta-Llama-3.3-70B-Instruct', name: 'Meta-Llama-3.3-70B-Instruct' },
+    { id: 'Meta-Llama-3.1-8B-Instruct', name: 'Meta-Llama-3.1-8B-Instruct' },
+    { id: 'MiniMax-M2.5', name: 'MiniMax-M2.5' },
+    { id: 'gpt-oss-120b', name: 'gpt-oss-120b' },
+    { id: 'Qwen3-32B', name: 'Qwen3-32B' },
+    { id: 'Llama-4-Maverick-17B-128E-Instruct', name: 'Llama-4-Maverick-17B-128E-Instruct' }
+];
+
+const SAMBANOVA_MODEL_PREFERENCE = [
+    'DeepSeek-V3.1',
+    'DeepSeek-R1-0528',
+    'Meta-Llama-3.3-70B-Instruct',
+    'Meta-Llama-3.1-8B-Instruct',
+    'MiniMax-M2.5',
+    'gpt-oss-120b',
+    'Qwen3-32B',
+    'Llama-4-Maverick-17B-128E-Instruct'
+];
+
+function isSambaNovaChatModel(modelId) {
+    const id = String(modelId || '').toLowerCase();
+    if (!id) return false;
+    if (id.includes('whisper')) return false;
+    if (id.includes('e5-mistral')) return false;
+    if (id.includes('embedding')) return false;
+    return true;
+}
+
+function sortSambaNovaModels(models) {
+    const order = new Map(SAMBANOVA_MODEL_PREFERENCE.map((id, index) => [id, index]));
+    return [...models].sort((a, b) => {
+        const ai = order.has(a.id) ? order.get(a.id) : Number.MAX_SAFE_INTEGER;
+        const bi = order.has(b.id) ? order.get(b.id) : Number.MAX_SAFE_INTEGER;
+        if (ai !== bi) return ai - bi;
+        return a.id.localeCompare(b.id);
+    });
+}
+
+async function loadSambaNovaModels(savedModel) {
+    const select = elements.sambanovaModelSelect;
+    select.innerHTML = '<option disabled selected>読み込み中...</option>';
+
+    const apiKey = elements.sambanovaApiKey.value.trim();
+
+    const applyModels = (models) => {
+        select.innerHTML = '';
+        models.forEach(model => {
+            const opt = document.createElement('option');
+            opt.value = model.id;
+            opt.textContent = model.name || model.id;
+            select.appendChild(opt);
+        });
+
+        if (savedModel && [...select.options].some(o => o.value === savedModel)) {
+            select.value = savedModel;
+        } else if (select.options.length > 0) {
+            select.selectedIndex = 0;
+        }
+    };
+
+    if (!apiKey) {
+        applyModels(SAMBANOVA_FALLBACK_MODELS);
+        return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    try {
+        const response = await fetch('https://api.sambanova.ai/v1/models', {
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData?.error?.message || errData?.message || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        const models = sortSambaNovaModels((data.data || [])
+            .filter(m => m.id && isSambaNovaChatModel(m.id))
+            .map(m => ({ id: m.id, name: m.id }))
+        );
+
+        if (models.length === 0) {
+            throw new Error('利用可能なチャットモデルがありません');
+        }
+
+        applyModels(models);
+        showSambanovaKeyStatus(`✅ ${models.length}件のモデルを取得しました`, 'success');
+    } catch (error) {
+        clearTimeout(timeoutId);
+        applyModels(SAMBANOVA_FALLBACK_MODELS);
+        if (error.name !== 'AbortError') {
+            showSambanovaKeyStatus(`⚠️ モデル取得失敗: ${error.message}`, 'error');
+        }
+    }
+}
+
+/**
+ * 長すぎるモデル名をドロップダウン用に短縮する
+ */
+function truncateLabel(label, maxLength = 42) {
+    if (label.length <= maxLength) {
+        return label;
+    }
+
+    return `${label.slice(0, maxLength - 1)}…`;
+}
+
+/**
+ * OpenRouterモデルの表示名をコンパクトに整形する
+ */
+function formatOpenRouterModelLabel(model) {
+    const promptPrice = parseFloat(model.pricing?.prompt ?? '0') * 1_000_000;
+    const displayName = (model.name || model.id)
+        .replace(/^[^:]+:\s*/, '')
+        .replace(/\s+\(free\)$/i, '');
+    const priceLabel = promptPrice > 0 ? ` | $${promptPrice.toFixed(2)}/1M` : ' | 無料';
+
+    return truncateLabel(`${displayName}${priceLabel}`);
+}
+
+/**
+ * 選択中のOpenRouterモデルをツールチップに反映する
+ */
+function syncOpenRouterModelTitle() {
+    const selectedOption = elements.openrouterModelSelect.selectedOptions[0];
+    elements.openrouterModelSelect.title = selectedOption ? selectedOption.value : '';
+}
+
+async function loadOpenRouterModels(savedModel) {
+    const select = elements.openrouterModelSelect;
+    select.innerHTML = '<option disabled selected>読み込み中...</option>';
+
+    try {
+        const response = await fetch('https://openrouter.ai/api/v1/models');
+        const data = await response.json();
+        const models = (data.data || []).sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+
+        const freeModels = models.filter(m => parseFloat(m.pricing?.prompt ?? '1') === 0);
+        const paidModels = models.filter(m => parseFloat(m.pricing?.prompt ?? '1') > 0);
+
+        select.innerHTML = '';
+
+        // 無料モデルもプロバイダーごとにグループ化（同名モデルを区別するため）
+        const freeProviderMap = {};
+        freeModels.forEach(m => {
+            const providerName = m.id.split('/')[0];
+            if (!freeProviderMap[providerName]) freeProviderMap[providerName] = [];
+            freeProviderMap[providerName].push(m);
+        });
+
+        Object.entries(freeProviderMap).sort().forEach(([providerName, list]) => {
+            const group = document.createElement('optgroup');
+            group.label = `${providerName}（無料）`;
+            list.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = formatOpenRouterModelLabel(m);
+                group.appendChild(opt);
+            });
+            select.appendChild(group);
+        });
+
+        // プロバイダーごとにグループ化（有料）
+        const providerMap = {};
+        paidModels.forEach(m => {
+            const providerName = m.id.split('/')[0];
+            if (!providerMap[providerName]) providerMap[providerName] = [];
+            providerMap[providerName].push(m);
+        });
+
+        Object.entries(providerMap).sort().forEach(([providerName, list]) => {
+            const group = document.createElement('optgroup');
+            group.label = providerName;
+            list.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = formatOpenRouterModelLabel(m);
+                group.appendChild(opt);
+            });
+            select.appendChild(group);
+        });
+
+        // API一覧に含まれない追加モデルを補完
+        const PROVIDER_MODELS = [
+            { id: 'meta-llama/llama-4-scout', label: 'Llama 4 Scout 17B | $0.08/1M', group: 'meta-llama' },
+            { id: 'meta-llama/llama-4-maverick', label: 'Llama 4 Maverick 17B | $0.18/1M', group: 'meta-llama' },
+        ];
+        const existingIds = new Set([...select.options].map(o => o.value));
+        const extraByGroup = {};
+        PROVIDER_MODELS.forEach(m => {
+            if (existingIds.has(m.id)) return;
+            if (!extraByGroup[m.group]) extraByGroup[m.group] = [];
+            extraByGroup[m.group].push(m);
+        });
+        Object.entries(extraByGroup).forEach(([groupName, list]) => {
+            const group = document.createElement('optgroup');
+            group.label = groupName;
+            list.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = m.label;
+                group.appendChild(opt);
+            });
+            select.appendChild(group);
+        });
+
+        // 保存済みモデルを復元
+        if (savedModel && [...select.options].some(o => o.value === savedModel)) {
+            select.value = savedModel;
+        }
+    } catch (error) {
+        // フェッチ失敗時は静的フォールバック
+        select.innerHTML = `
+            <optgroup label="無料モデル">
+                <option value="google/gemma-4-31b-it:free">Gemma 4 31B | 無料</option>
+                <option value="google/gemma-4-26b-a4b-it:free">Gemma 4 26B A4B | 無料</option>
+                <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 120B | 無料</option>
+            </optgroup>
+            <optgroup label="google">
+                <option value="google/gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite | $0.25/1M</option>
+                <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro | $2.00/1M</option>
+            </optgroup>
+            <optgroup label="anthropic">
+                <option value="anthropic/claude-sonnet-4.6">Claude Sonnet 4.6 | $3.00/1M</option>
+                <option value="anthropic/claude-opus-4.6">Claude Opus 4.6 | $5.00/1M</option>
+            </optgroup>
+            <optgroup label="openai">
+                <option value="openai/gpt-5.4-mini">GPT-5.4 Mini | $0.75/1M</option>
+                <option value="openai/gpt-5.4">GPT-5.4 | $2.50/1M</option>
+            </optgroup>
+            <optgroup label="meta-llama">
+                <option value="meta-llama/llama-4-scout">Llama 4 Scout 17B | $0.08/1M</option>
+                <option value="meta-llama/llama-4-maverick">Llama 4 Maverick 17B | $0.18/1M</option>
+                <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B | $0.12/1M</option>
+            </optgroup>
+        `;
+        if (savedModel) select.value = savedModel;
+    }
+
+    syncOpenRouterModelTitle();
 }
 
 /**
@@ -119,12 +646,98 @@ async function checkTranslationState() {
  * イベントリスナーのセットアップ
  */
 function setupEventListeners() {
-    // APIキーの表示/非表示
+    // プロバイダー切り替え
+    elements.apiProvider.addEventListener('change', async () => {
+        const provider = elements.apiProvider.value;
+        updateProviderUI(provider);
+        await settingsStorage.set({ apiProvider: provider });
+
+        if (provider === 'gemini') {
+            const saved = await settingsStorage.get(['apiKey', 'model']);
+            if (saved.apiKey) await loadGeminiModels(saved.apiKey, saved.model);
+        } else if (provider === 'openrouter') {
+            const saved = await settingsStorage.get(['openrouterModel']);
+            await loadOpenRouterModels(saved.openrouterModel);
+        } else if (provider === 'sambanova') {
+            const saved = await settingsStorage.get(['sambanovaModel']);
+            await loadSambaNovaModels(saved.sambanovaModel);
+        } else if (provider === 'lmstudio') {
+            const saved = await settingsStorage.get(['lmstudioModel']);
+            await loadLMStudioModels(saved.lmstudioModel);
+        }
+
+        // 翻訳ボタンの有効/無効を再評価
+        const result = await settingsStorage.get(['apiKey', 'openrouterApiKey', 'sambanovaApiKey', 'lmstudioEndpoint']);
+        let activeKey;
+        if (provider === 'openrouter') activeKey = result.openrouterApiKey;
+        else if (provider === 'sambanova') activeKey = result.sambanovaApiKey;
+        else if (provider === 'lmstudio') activeKey = result.lmstudioEndpoint || elements.lmstudioEndpoint.value;
+        else activeKey = result.apiKey;
+        elements.translateBtn.disabled = !activeKey;
+    });
+
+    // Gemini モデル一覧の再取得
+    elements.geminiRefresh.addEventListener('click', async () => {
+        const saved = await settingsStorage.get(['apiKey', 'model']);
+        await loadGeminiModels(saved.apiKey, saved.model);
+    });
+
+    // LM Studio モデル一覧の再取得
+    elements.lmstudioRefresh.addEventListener('click', async () => {
+        const btn = elements.lmstudioRefresh;
+        btn.disabled = true;
+        const originalText = btn.querySelector('.btn-text').textContent;
+        btn.querySelector('.btn-text').textContent = '⏳ 取得中...';
+        try {
+            const saved = await settingsStorage.get(['lmstudioModel']);
+            await loadLMStudioModels(saved.lmstudioModel);
+        } finally {
+            btn.querySelector('.btn-text').textContent = originalText;
+            btn.disabled = false;
+        }
+    });
+
+    // LM Studio エンドポイント変更時はモデル一覧を再取得
+    elements.lmstudioEndpoint.addEventListener('change', async () => {
+        const saved = await settingsStorage.get(['lmstudioModel']);
+        await loadLMStudioModels(saved.lmstudioModel);
+    });
+
+    // APIキーの表示/非表示（Gemini）
     elements.toggleKey.addEventListener('click', () => {
         const isPassword = elements.apiKey.type === 'password';
         elements.apiKey.type = isPassword ? 'text' : 'password';
         elements.toggleIcon.textContent = isPassword ? '🔒' : '👁';
     });
+
+    // APIキーの表示/非表示（OpenRouter）
+    elements.toggleOpenrouterKey.addEventListener('click', () => {
+        const isPassword = elements.openrouterApiKey.type === 'password';
+        elements.openrouterApiKey.type = isPassword ? 'text' : 'password';
+        elements.toggleOpenrouterIcon.textContent = isPassword ? '🔒' : '👁';
+    });
+
+    elements.toggleSambanovaKey.addEventListener('click', () => {
+        const isPassword = elements.sambanovaApiKey.type === 'password';
+        elements.sambanovaApiKey.type = isPassword ? 'text' : 'password';
+        elements.toggleSambanovaIcon.textContent = isPassword ? '🔒' : '👁';
+    });
+
+    elements.sambanovaRefresh.addEventListener('click', async () => {
+        const btn = elements.sambanovaRefresh;
+        btn.disabled = true;
+        const originalText = btn.querySelector('.btn-text').textContent;
+        btn.querySelector('.btn-text').textContent = '⏳ 取得中...';
+        try {
+            const saved = await settingsStorage.get(['sambanovaModel']);
+            await loadSambaNovaModels(saved.sambanovaModel);
+        } finally {
+            btn.querySelector('.btn-text').textContent = originalText;
+            btn.disabled = false;
+        }
+    });
+
+    elements.openrouterModelSelect.addEventListener('change', syncOpenRouterModelTitle);
 
     // 設定保存
     elements.saveSettings.addEventListener('click', saveSettings);
@@ -156,6 +769,9 @@ function setupEventListeners() {
 
     // 翻訳キャッシュクリア
     elements.clearCache.addEventListener('click', handleClearCache);
+
+    // サイト別キャッシュ表示トグル
+    elements.toggleCacheSites.addEventListener('click', toggleCacheSitesPanel);
 
     // ログ表示トグル
     elements.toggleLogs.addEventListener('click', toggleLogViewer);
@@ -215,42 +831,74 @@ function setupEventListeners() {
  * 設定を保存する
  */
 async function saveSettings() {
+    const provider = elements.apiProvider.value;
     const apiKey = elements.apiKey.value.trim();
+    const openrouterApiKey = elements.openrouterApiKey.value.trim();
+    const sambanovaApiKey = elements.sambanovaApiKey.value.trim();
+    const lmstudioEndpoint = (elements.lmstudioEndpoint.value || 'http://localhost:1234').trim();
+    const lmstudioModel = elements.lmstudioModelSelect.value;
+    const lmstudioSourceLang = elements.lmstudioSourceLang.value;
     const targetLang = elements.targetLang.value;
     const model = elements.modelSelect.value;
+    const openrouterModel = elements.openrouterModelSelect.value;
+    const sambanovaModel = elements.sambanovaModelSelect.value;
     const batchMaxChars = parseInt(elements.batchSize.value, 10);
 
-    if (!apiKey) {
-        showKeyStatus('APIキーを入力してください', 'error');
+    let activeKey, showKeyStatusFn, activeModel;
+    if (provider === 'openrouter') {
+        activeKey = openrouterApiKey;
+        activeModel = openrouterModel;
+        showKeyStatusFn = (msg, type) => showOpenrouterKeyStatus(msg, type);
+    } else if (provider === 'sambanova') {
+        activeKey = sambanovaApiKey;
+        activeModel = sambanovaModel;
+        showKeyStatusFn = (msg, type) => showSambanovaKeyStatus(msg, type);
+    } else if (provider === 'lmstudio') {
+        activeKey = lmstudioEndpoint;
+        activeModel = lmstudioModel;
+        showKeyStatusFn = (msg, type) => showLMStudioKeyStatus(msg, type);
+    } else {
+        activeKey = apiKey;
+        activeModel = model;
+        showKeyStatusFn = (msg, type) => showKeyStatus(msg, type);
+    }
+
+    if (!activeKey) {
+        const label = provider === 'lmstudio' ? 'エンドポイントを入力してください' : 'APIキーを入力してください';
+        showKeyStatusFn(label, 'error');
         return;
     }
 
-    // 保存ボタンをローディング状態にする
     const saveBtn = elements.saveSettings;
     const originalText = saveBtn.querySelector('.btn-text').textContent;
     saveBtn.querySelector('.btn-text').textContent = '⏳ 検証中...';
     saveBtn.disabled = true;
 
-    // まず設定を保存する
-    await settingsStorage.set({ apiKey, targetLang, model, batchMaxChars });
+    await settingsStorage.set({
+        apiKey, openrouterApiKey, sambanovaApiKey, apiProvider: provider,
+        targetLang, model, openrouterModel, sambanovaModel,
+        lmstudioEndpoint, lmstudioModel, lmstudioSourceLang,
+        batchMaxChars
+    });
     elements.translateBtn.disabled = false;
 
     try {
-        // APIキーをテスト
         const response = await sendRuntimeMessageWithTimeout({
             type: 'TEST_API_KEY',
-            apiKey,
-            model
+            apiKey: activeKey,
+            model: activeModel,
+            provider
         });
 
         if (response.success && response.isValid) {
-            showKeyStatus('✅ APIキーが有効です。設定を保存しました。', 'success');
+            const label = provider === 'lmstudio' ? '✅ LM Studio に接続できました。設定を保存しました。' : '✅ APIキーが有効です。設定を保存しました。';
+            showKeyStatusFn(label, 'success');
         } else {
             const detail = response.error || '接続テストに失敗しました';
-            showKeyStatus(`⚠️ 設定を保存しました。検証結果: ${detail}`, 'error');
+            showKeyStatusFn(`⚠️ 設定を保存しました。検証結果: ${detail}`, 'error');
         }
     } catch (error) {
-        showKeyStatus('✅ 設定を保存しました（検証スキップ）', 'success');
+        showKeyStatusFn('✅ 設定を保存しました（検証スキップ）', 'success');
     } finally {
         saveBtn.querySelector('.btn-text').textContent = originalText;
         saveBtn.disabled = false;
@@ -293,7 +941,7 @@ async function startTranslation() {
         const response = await sendTabMessageWithTimeout(tab.id, {
             type: 'START_TRANSLATION',
             targetLang,
-            batchMaxChars: settings.batchMaxChars || 3000
+            batchMaxChars: resolveBatchMaxChars(settings.batchMaxChars)
         });
 
         if (!response?.success) {
@@ -386,7 +1034,7 @@ function onTranslationError(error) {
 }
 
 /**
- * APIキーステータスを表示
+ * APIキーステータスを表示（Gemini）
  */
 function showKeyStatus(message, type) {
     elements.keyStatus.textContent = message;
@@ -395,6 +1043,42 @@ function showKeyStatus(message, type) {
 
     setTimeout(() => {
         elements.keyStatus.classList.add('hidden');
+    }, 5000);
+}
+
+/**
+ * APIキーステータスを表示（OpenRouter）
+ */
+function showOpenrouterKeyStatus(message, type) {
+    elements.openrouterKeyStatus.textContent = message;
+    elements.openrouterKeyStatus.className = `key-status ${type}`;
+    elements.openrouterKeyStatus.classList.remove('hidden');
+
+    setTimeout(() => {
+        elements.openrouterKeyStatus.classList.add('hidden');
+    }, 5000);
+}
+
+function showSambanovaKeyStatus(message, type) {
+    elements.sambanovaKeyStatus.textContent = message;
+    elements.sambanovaKeyStatus.className = `key-status ${type}`;
+    elements.sambanovaKeyStatus.classList.remove('hidden');
+
+    setTimeout(() => {
+        elements.sambanovaKeyStatus.classList.add('hidden');
+    }, 5000);
+}
+
+/**
+ * LM Studio 接続ステータスを表示
+ */
+function showLMStudioKeyStatus(message, type) {
+    elements.lmstudioKeyStatus.textContent = message;
+    elements.lmstudioKeyStatus.className = `key-status ${type}`;
+    elements.lmstudioKeyStatus.classList.remove('hidden');
+
+    setTimeout(() => {
+        elements.lmstudioKeyStatus.classList.add('hidden');
     }, 5000);
 }
 
@@ -516,7 +1200,7 @@ async function toggleUsageViewer() {
 }
 
 /**
- * 翻訳キャッシュをクリアする
+ * 翻訳キャッシュをクリアする（全サイト）
  */
 async function handleClearCache() {
     try {
@@ -525,13 +1209,84 @@ async function handleClearCache() {
         btn.querySelector('.btn-text').textContent = '🗑 クリア中...';
         await sendRuntimeMessageWithTimeout({ type: 'CLEAR_CACHE' });
         btn.querySelector('.btn-text').textContent = '✅ クリア完了';
+        loadCacheSites();
         setTimeout(() => {
-            btn.querySelector('.btn-text').textContent = '🗑 翻訳キャッシュをクリア';
+            btn.querySelector('.btn-text').textContent = '🗑 全キャッシュをクリア';
             btn.disabled = false;
         }, 2000);
     } catch (error) {
-        elements.clearCache.querySelector('.btn-text').textContent = '🗑 翻訳キャッシュをクリア';
+        elements.clearCache.querySelector('.btn-text').textContent = '🗑 全キャッシュをクリア';
         elements.clearCache.disabled = false;
+    }
+}
+
+/**
+ * サイト別キャッシュ一覧を読み込んで表示する
+ */
+async function loadCacheSites() {
+    try {
+        const response = await sendRuntimeMessageWithTimeout({ type: 'GET_CACHE_SITES' });
+        if (!response.success || !response.sites || response.sites.length === 0) {
+            elements.cacheSitesList.innerHTML = '<div class="cache-site-empty">キャッシュされたサイトはありません</div>';
+            return;
+        }
+        renderCacheSites(response.sites);
+    } catch {
+        elements.cacheSitesList.innerHTML = '<div class="cache-site-empty">読み込みに失敗しました</div>';
+    }
+}
+
+/**
+ * サイト一覧をDOMに描画する
+ */
+function renderCacheSites(sites) {
+    const list = elements.cacheSitesList;
+    list.innerHTML = '';
+    for (const site of sites) {
+        const sizeKB = (site.size / 1024).toFixed(1);
+        const row = document.createElement('div');
+        row.className = 'cache-site-row';
+        row.innerHTML = `
+            <span class="cache-site-host" title="${site.host}">${site.host}</span>
+            <span class="cache-site-stats">${site.count}件 (${sizeKB}KB)</span>
+            <button class="btn btn-danger btn-xs cache-site-delete" data-host="${site.host}">
+                <span class="btn-text">削除</span>
+            </button>
+        `;
+        row.querySelector('.cache-site-delete').addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            const host = btn.dataset.host;
+            btn.disabled = true;
+            btn.querySelector('.btn-text').textContent = '...';
+            try {
+                await sendRuntimeMessageWithTimeout({ type: 'CLEAR_CACHE', host });
+                row.remove();
+                // リストが空になったらメッセージ表示
+                if (list.children.length === 0) {
+                    list.innerHTML = '<div class="cache-site-empty">キャッシュされたサイトはありません</div>';
+                }
+            } catch {
+                btn.disabled = false;
+                btn.querySelector('.btn-text').textContent = '削除';
+            }
+        });
+        list.appendChild(row);
+    }
+}
+
+/**
+ * サイト別キャッシュパネルの表示/非表示を切り替える
+ */
+function toggleCacheSitesPanel() {
+    const list = elements.cacheSitesList;
+    const btn = elements.toggleCacheSites;
+    if (list.style.display === 'none') {
+        list.style.display = '';
+        btn.querySelector('.btn-text').textContent = '▲ 閉じる';
+        loadCacheSites();
+    } else {
+        list.style.display = 'none';
+        btn.querySelector('.btn-text').textContent = '▼ 表示';
     }
 }
 
@@ -570,9 +1325,11 @@ function renderUsage(usage, pricing) {
     // モデルごとのコストを計算
     let totalCost = 0;
     const modelRows = Object.entries(usage.byModel || {}).map(([model, data]) => {
-        const price = pricing[model] || { input: 0.10, output: 0.40 };
-        const cost = (data.inputTokens * price.input + data.outputTokens * price.output) / 1_000_000;
-        totalCost += cost;
+        const price = pricing[model];
+        const cost = price
+            ? (data.inputTokens * price.input + data.outputTokens * price.output) / 1_000_000
+            : null;
+        if (cost !== null) totalCost += cost;
         return { model, data, cost };
     });
 
@@ -582,7 +1339,10 @@ function renderUsage(usage, pricing) {
             ? (n / 1000).toFixed(1) + 'K'
             : String(n);
 
-    const formatCost = c => c < 0.0001 ? '< $0.0001' : `$${c.toFixed(4)}`;
+    const formatCost = c => {
+        if (c === null) return 'N/A';
+        return c < 0.0001 ? '< $0.0001' : `$${c.toFixed(4)}`;
+    };
 
     const since = new Date(usage.since).toLocaleString('ja-JP', {
         year: 'numeric', month: '2-digit', day: '2-digit',
@@ -601,7 +1361,7 @@ function renderUsage(usage, pricing) {
         <div class="usage-cost-row">
             <span class="usage-cost-label">推定コスト</span>
             <span class="usage-cost-value">${formatCost(totalCost)}</span>
-            <span class="usage-cost-note">有料プランの場合</span>
+            <span class="usage-cost-note">価格テーブル登録モデルのみ集計</span>
         </div>
         <div class="usage-stats">
             <div class="usage-stat">

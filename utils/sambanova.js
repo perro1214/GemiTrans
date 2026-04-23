@@ -1,45 +1,17 @@
 /**
- * Gemini API クライアント
- * テキスト翻訳のためのAPI通信を担当
+ * SambaNova API クライアント
+ * OpenAI互換APIで各種モデルを呼び出す
  */
 
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-const DEFAULT_MODEL = 'gemini-2.0-flash';
+const SAMBANOVA_API_BASE = 'https://api.sambanova.ai/v1/chat/completions';
+export const DEFAULT_MODEL = 'DeepSeek-V3.1';
 
-// リトライ設定
 const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY = 1000; // 1秒
+const RETRY_BASE_DELAY = 1000;
 const RETRYABLE_STATUS_CODES = [429, 500, 503];
 const REQUEST_TIMEOUT_MS = 30000;
+const MAX_BATCH_CHARS = 3000;
 
-// バッチ設定
-const MAX_BATCH_CHARS = 3000; // バッチあたり最大文字数
-
-// 絵文字マスキング: 翻訳前に絵文字をプレースホルダーに置換して保護する
-const EMOJI_MASK_RE = /[\u{1F000}-\u{1FFFF}\u{20000}-\u{2FFFF}\u2600-\u27BF\u2B00-\u2BFF\uFE00-\uFE0F\u20E3\u200D\u{1F3FB}-\u{1F3FF}]+/gu;
-
-function maskEmojis(text) {
-  const map = [];
-  const masked = text.replace(EMOJI_MASK_RE, match => {
-    const token = `\uE000${map.length}\uE001`;
-    map.push(match);
-    return token;
-  });
-  return { masked, map };
-}
-
-function unmaskEmojis(text, map) {
-  if (map.length === 0) return text;
-  return text.replace(/\uE000(\d+)\uE001/g, (_, i) => map[+i] ?? _);
-}
-
-/**
- * 指数バックオフ付きリトライでfetchを実行する
- * @param {string} url
- * @param {RequestInit} options
- * @param {number} maxRetries
- * @returns {Promise<Response>}
- */
 async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
   let lastError;
 
@@ -59,24 +31,21 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
         return response;
       }
 
-      // リトライ可能なステータスコードかチェック
       if (RETRYABLE_STATUS_CODES.includes(response.status) && attempt < maxRetries) {
         const delay = RETRY_BASE_DELAY * Math.pow(2, attempt);
         const retryAfter = response.headers.get('Retry-After');
-        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : delay;
+        const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : delay;
         await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
       }
 
-      // リトライ不可のエラー
       const errorData = await response.json().catch(() => ({}));
-      const errorMessage = errorData?.error?.message || response.statusText || `モデルが見つかりません（${response.status}）`;
-      throw new Error(`Gemini API Error (${response.status}): ${errorMessage}`);
+      const errorMessage = errorData?.error?.message || errorData?.message || response.statusText;
+      throw new Error(`SambaNova API Error (${response.status}): ${errorMessage}`);
     } catch (error) {
       clearTimeout(timeoutId);
       lastError = error;
 
-      // ネットワークエラーの場合もリトライ
       if ((error.name === 'TypeError' || error.name === 'AbortError') && attempt < maxRetries) {
         const delay = RETRY_BASE_DELAY * Math.pow(2, attempt);
         await new Promise(resolve => setTimeout(resolve, delay));
@@ -84,7 +53,7 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
       }
 
       if (error.name === 'AbortError') {
-        throw new Error(`Gemini API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+        throw new Error(`SambaNova API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
       }
 
       throw error;
@@ -94,77 +63,40 @@ async function fetchWithRetry(url, options, maxRetries = MAX_RETRIES) {
   throw lastError;
 }
 
-/**
- * Gemini APIを使用してテキストを翻訳する
- * @param {string} text - 翻訳するテキスト
- * @param {string} targetLang - 翻訳先の言語
- * @param {string} apiKey - Gemini API キー
- * @param {string} [model] - 使用するモデル名
- * @param {Function|null} [onUsage]
- * @param {{role?: string, pageContext?: {title?: string, hostname?: string, pageLang?: string}|null}} [options]
- * @returns {Promise<string>} 翻訳されたテキスト
- */
-export async function translateText(text, targetLang, apiKey, model = DEFAULT_MODEL, onUsage = null, options = {}) {
-  if (!text || !text.trim()) {
-    return text;
-  }
-
-  const url = `${GEMINI_API_BASE}/${model}:generateContent?key=${apiKey}`;
-
-  const { masked, map } = maskEmojis(text);
-  const prompt = buildTranslationPrompt(masked, targetLang, options);
-
-  const requestBody = {
-    contents: [
-      {
-        parts: [
-          {
-            text: prompt
-          }
-        ]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      topP: 0.95,
-      maxOutputTokens: 8192
-    }
+async function callSambaNova(apiKey, model, prompt, onUsage = null) {
+  const body = {
+    model,
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.1,
+    max_tokens: 8192
   };
 
-  const response = await fetchWithRetry(url, {
+  const response = await fetchWithRetry(SAMBANOVA_API_BASE, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
     },
-    body: JSON.stringify(requestBody)
+    body: JSON.stringify(body)
   });
 
   const data = await response.json();
 
-  if (!data.candidates || data.candidates.length === 0) {
-    throw new Error('Gemini APIから応答がありませんでした');
-  }
-
-  const translatedText = data.candidates[0]?.content?.parts?.[0]?.text;
-
-  if (!translatedText) {
-    throw new Error('翻訳結果の取得に失敗しました');
-  }
-
-  if (onUsage && data.usageMetadata) {
+  if (onUsage && data.usage) {
     onUsage({
-      inputTokens: data.usageMetadata.promptTokenCount || 0,
-      outputTokens: data.usageMetadata.candidatesTokenCount || 0
+      inputTokens: data.usage.prompt_tokens || 0,
+      outputTokens: data.usage.completion_tokens || 0
     });
   }
 
-  return unmaskEmojis(stripLeadingRoleParen(translatedText.trim()), map);
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('SambaNova APIから応答がありませんでした');
+  }
+
+  return content;
 }
 
-/**
- * ページ文脈（タイトル・ドメイン・html lang）をプロンプトのヘッダー行に整形する。
- * 何も無いときは空文字列を返す。
- */
 function buildContextBlock(pageContext) {
   if (!pageContext) return '';
   const title = (pageContext.title || '').trim();
@@ -178,22 +110,11 @@ function buildContextBlock(pageContext) {
   return `\nPage context (metadata only — use to decide tone and terminology, never translate or quote this block):\n${lines.join('\n')}\n`;
 }
 
-/**
- * モデルが出力に "(h1) 翻訳" のように role ヒントを残してしまった場合に備えた後処理。
- * 単純な `(識別子)` だけを先頭から剥がし、本文の括弧は壊さない。
- */
 function stripLeadingRoleParen(s) {
   if (!s) return s;
   return s.replace(/^\s*\(([\w-]{1,24})\)\s+/, '');
 }
 
-/**
- * 翻訳用のプロンプトを構築する
- * @param {string} text - 翻訳するテキスト
- * @param {string} targetLang - 翻訳先の言語
- * @param {{role?: string, pageContext?: object|null}} [options]
- * @returns {string} プロンプト文字列
- */
 function buildTranslationPrompt(text, targetLang, options = {}) {
   const contextBlock = buildContextBlock(options.pageContext);
   const role = options.role ? String(options.role) : '';
@@ -224,11 +145,6 @@ Text:
 ${text}`;
 }
 
-/**
- * バッチ翻訳用プロンプトを構築する（番号付きフォーマット + role ヒント）
- * 番号付きの方が Gemini が構造を崩しにくく、役割を (paren) で添えることで
- * "ヘッドライン調 / ボタン調 / 本文" のトーンをモデルに意識させる。
- */
 function buildBatchPrompt(texts, targetLang, options = {}) {
   const contextBlock = buildContextBlock(options.pageContext);
   const roles = Array.isArray(options.roles) ? options.roles : [];
@@ -268,13 +184,6 @@ Items:
 ${numbered}`;
 }
 
-/**
- * 番号付きフォーマットのレスポンスをパースする
- * 複数行にまたがる翻訳も正しく収集する
- * @param {string} responseText
- * @param {number} expectedCount
- * @returns {Array<string|null>} パース結果（取得できなかった項目はnull）
- */
 function parseBatchResponse(responseText, expectedCount) {
   const results = new Array(expectedCount).fill(null);
   let currentIdx = -1;
@@ -302,19 +211,23 @@ function parseBatchResponse(responseText, expectedCount) {
   return results;
 }
 
-/**
- * テキストの配列を文字数ベースで動的にバッチ分割する
- * @param {string[]} texts - テキストの配列
- * @param {number} maxChars - バッチあたりの最大文字数
- * @returns {string[][]} バッチに分割されたテキスト配列
- */
+export async function translateText(text, targetLang, apiKey, model = DEFAULT_MODEL, onUsage = null, options = {}) {
+  if (!text || !text.trim()) {
+    return text;
+  }
+
+  const prompt = buildTranslationPrompt(text, targetLang, options);
+  const result = await callSambaNova(apiKey, model, prompt, onUsage);
+  return stripLeadingRoleParen(result.trim());
+}
+
 export function splitIntoBatches(texts, maxChars = MAX_BATCH_CHARS) {
   const batches = [];
   let currentBatch = [];
   let currentLength = 0;
 
   for (const text of texts) {
-    const textLength = text.length + 7; // [SEP] の長さを加算
+    const textLength = text.length + 7;
 
     if (currentBatch.length > 0 && currentLength + textLength > maxChars) {
       batches.push(currentBatch);
@@ -333,66 +246,27 @@ export function splitIntoBatches(texts, maxChars = MAX_BATCH_CHARS) {
   return batches;
 }
 
-/**
- * テキストの配列をバッチで翻訳する
- * 番号付きフォーマットで一括送信し、パースできなかった項目のみ並列で個別翻訳する
- * @param {string[]} texts - 翻訳するテキストの配列
- * @param {string} targetLang - 翻訳先の言語
- * @param {string} apiKey - Gemini API キー
- * @param {string} [model] - 使用するモデル名
- * @returns {Promise<string[]>} 翻訳されたテキストの配列
- */
 export async function translateBatch(texts, targetLang, apiKey, model = DEFAULT_MODEL, onUsage = null, options = {}) {
   if (!texts || texts.length === 0) return [];
 
   const roles = Array.isArray(options.roles) ? options.roles : [];
   const pageContext = options.pageContext || null;
 
-  // 1件のみの場合は通常翻訳
   if (texts.length === 1) {
     try {
       return [await translateText(texts[0], targetLang, apiKey, model, onUsage, {
-        role: roles[0],
-        pageContext
+        role: roles[0], pageContext
       })];
     } catch (e) {
-      // エラー時は null を返し、呼び出し側で処理させる
       return [null];
     }
   }
 
-  const url = `${GEMINI_API_BASE}/${model}:generateContent?key=${apiKey}`;
-
-  // 各テキストの絵文字をマスクしてからバッチプロンプトを構築
-  const emojiMasks = texts.map(t => maskEmojis(t));
-  const maskedTexts = emojiMasks.map(m => m.masked);
-
   try {
-    // 番号付きフォーマットでバッチリクエスト
-    const response = await fetchWithRetry(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: buildBatchPrompt(maskedTexts, targetLang, { roles, pageContext }) }] }],
-        generationConfig: { temperature: 0.1, topP: 0.95, maxOutputTokens: 8192 }
-      })
-    });
+    const prompt = buildBatchPrompt(texts, targetLang, { roles, pageContext });
+    const responseText = await callSambaNova(apiKey, model, prompt, onUsage);
+    const parsed = parseBatchResponse(responseText, texts.length);
 
-    const data = await response.json();
-
-    if (onUsage && data.usageMetadata) {
-      onUsage({
-        inputTokens: data.usageMetadata.promptTokenCount || 0,
-        outputTokens: data.usageMetadata.candidatesTokenCount || 0
-      });
-    }
-
-    const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const parsed = parseBatchResponse(responseText, texts.length).map(
-      (r, i) => r !== null ? unmaskEmojis(r, emojiMasks[i].map) : null
-    );
-
-    // パースできなかった項目だけ並列で個別翻訳（直列フォールバックを廃止）
     const missIndices = parsed.reduce((acc, r, i) => {
       if (r === null) acc.push(i);
       return acc;
@@ -406,35 +280,55 @@ export async function translateBatch(texts, targetLang, apiKey, model = DEFAULT_
           return await translateText(texts[i], targetLang, apiKey, model, onUsage, {
             role: roles[i], pageContext
           });
-        } catch (e) { return null; }
+        } catch (e) {
+          return null;
+        }
       })
     );
     missIndices.forEach((origIdx, j) => { parsed[origIdx] = missResults[j]; });
     return parsed;
 
   } catch (e) {
-    // バッチリクエスト自体が失敗した場合も並列で個別翻訳
     return Promise.all(texts.map(async (text, i) => {
       try {
         return await translateText(text, targetLang, apiKey, model, onUsage, {
           role: roles[i], pageContext
         });
-      } catch (e) { return null; }
+      } catch (err) {
+        return null;
+      }
     }));
   }
 }
 
-/**
- * APIキーの有効性をテストする
- * @param {string} apiKey - テストするAPIキー
- * @param {string} [model] - 使用するモデル名
- * @returns {Promise<boolean>} 有効な場合true
- */
 export async function testApiKey(apiKey, model) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
   try {
-    const result = await translateText('Hello', '日本語', apiKey, model || DEFAULT_MODEL);
-    return !!result;
-  } catch (e) {
-    throw e;
+    const response = await fetch('https://api.sambanova.ai/v1/models', {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const message = errorData?.error?.message || errorData?.message || response.statusText;
+      throw new Error(`SambaNova API Error (${response.status}): ${message}`);
+    }
+
+    const data = await response.json();
+    const models = data.data || [];
+    if (model && models.length > 0 && !models.some(m => m.id === model)) {
+      throw new Error(`SambaNova API Error (400): Model not available: ${model}`);
+    }
+    return models.length > 0 || response.ok;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('SambaNova API request timed out');
+    }
+    throw error;
   }
 }

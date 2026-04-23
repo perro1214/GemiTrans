@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "qwen-turboquant": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Qwen3.5-27B turboquant",
+      "options": {
+        "baseURL": "http://localhost:18000/v1"
+      },
+      "models": {
+        "qwen3.5-27b": {
+          "name": "Qwen3.5-27B Claude Distilled",
+          "attachment": false
+        }
+      }
+    }
+  },
+  "model": "qwen-turboquant/qwen3.5-27b"
+}

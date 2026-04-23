@@ -12,6 +12,11 @@
 | 2 | バッチの一部失敗時は成功分のみ DOM 反映のうえ `throw` し、ポップアップに `TRANSLATION_ERROR` で伝える。 |
 | 配置 | `manifest` 用の `content/content.js` をリポジトリ直下に配置（以前は誤配置フォルダのみに存在）。 |
 | ポップアップ更新 | MV3 でコンテンツ発の `TRANSLATION_*` が SW にしか届かない場合に備え、`background/background.js` で `sender.tab` があるとき `chrome.runtime.sendMessage` により拡張ページへ転送。 |
+| 3 | API エラー時に原文フォールバックせず null を返し、content.js で警告ログを出力するように変更（gemini.js, openrouter.js, lmstudio.js, content.js） |
+| 4 | キャッシュキーの衝突耐性を向上させるため、ハッシュに原文の短いフィンガープリント（最初16文字+最後16文字）を追加（cache.js, background.js） |
+| 5 | APIキーの平文保存について警告をポップアップUIに追加（popup.html, popup.css） |
+| 6 | 自動翻訳のコスト・レート制限について警告をポップアップUIに追加（popup.html） |
+| 10 | icons/*.png の実体を確認（icon16.png, icon48.png, icon128.png が存在することを確認） |
 
 ※ ポップアップを**閉じたまま**の進捗表示は従来どおり更新されない（別仕様）。
 

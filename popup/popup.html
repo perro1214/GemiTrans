@@ -14,7 +14,7 @@
         <img src="../icons/icon48.png" alt="icon" class="logo-icon">
         <div>
           <h1 class="title">AI Translator</h1>
-          <p class="subtitle">Powered by Gemini</p>
+          <p class="subtitle">Powered by Multi-LLM</p>
         </div>
       </div>
     </header>
@@ -22,9 +22,23 @@
     <!-- 設定セクション -->
     <section class="section" id="settings-section">
       <div class="field">
+        <label class="label" for="api-provider">
+          <span class="label-icon">🔌</span>
+          APIプロバイダー
+        </label>
+        <select id="api-provider" class="select">
+          <option value="gemini">Google Gemini</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="sambanova">SambaNova</option>
+          <option value="lmstudio">LM Studio (ローカル)</option>
+        </select>
+      </div>
+
+      <!-- Gemini APIキー -->
+      <div class="field" id="gemini-key-field">
         <label class="label" for="api-key">
           <span class="label-icon">🔑</span>
-          API Key
+          Gemini API Key
         </label>
         <div class="input-group">
           <input
@@ -39,6 +53,73 @@
           </button>
         </div>
         <div id="key-status" class="key-status hidden"></div>
+        <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
+      </div>
+
+      <!-- LM Studio エンドポイント -->
+      <div class="field hidden" id="lmstudio-endpoint-field">
+        <label class="label" for="lmstudio-endpoint">
+          <span class="label-icon">🖥️</span>
+          LM Studio エンドポイント
+        </label>
+        <div class="input-group">
+          <input
+            type="text"
+            id="lmstudio-endpoint"
+            class="input"
+            placeholder="http://localhost:1234"
+            autocomplete="off"
+            value="http://localhost:1234"
+          >
+        </div>
+        <div id="lmstudio-key-status" class="key-status hidden"></div>
+        <p class="hint-text">
+          <code>lms server start</code> でローカルサーバーを起動し、TranslateGemma モデルをロードしてください。
+        </p>
+      </div>
+
+      <!-- OpenRouter APIキー -->
+      <div class="field hidden" id="openrouter-key-field">
+        <label class="label" for="openrouter-api-key">
+          <span class="label-icon">🔑</span>
+          OpenRouter API Key
+        </label>
+        <div class="input-group">
+          <input
+            type="password"
+            id="openrouter-api-key"
+            class="input"
+            placeholder="OpenRouter API キーを入力..."
+            autocomplete="off"
+          >
+          <button id="toggle-openrouter-key" class="btn-icon" title="表示/非表示">
+            <span id="toggle-openrouter-icon">👁</span>
+          </button>
+        </div>
+        <div id="openrouter-key-status" class="key-status hidden"></div>
+        <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
+      </div>
+
+      <!-- SambaNova APIキー -->
+      <div class="field hidden" id="sambanova-key-field">
+        <label class="label" for="sambanova-api-key">
+          <span class="label-icon">🔑</span>
+          SambaNova API Key
+        </label>
+        <div class="input-group">
+          <input
+            type="password"
+            id="sambanova-api-key"
+            class="input"
+            placeholder="SambaNova API キーを入力..."
+            autocomplete="off"
+          >
+          <button id="toggle-sambanova-key" class="btn-icon" title="表示/非表示">
+            <span id="toggle-sambanova-icon">👁</span>
+          </button>
+        </div>
+        <div id="sambanova-key-status" class="key-status hidden"></div>
+        <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
       </div>
 
       <div class="field">
@@ -60,7 +141,8 @@
         </select>
       </div>
 
-      <div class="field">
+      <!-- Gemini モデル選択 -->
+      <div class="field" id="gemini-model-field">
         <label class="label" for="model-select">
           <span class="label-icon">🤖</span>
           モデル
@@ -68,9 +150,112 @@
         <select id="model-select" class="select">
           <option value="gemini-2.0-flash">Gemini 2.0 Flash（高速）</option>
           <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite（最速）</option>
-          <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite Preview</option>
+          <option value="gemini-2.5-flash-preview-04-17">Gemini 2.5 Flash Preview</option>
           <option value="gemini-2.5-pro-preview-05-06">Gemini 2.5 Pro（高精度）</option>
         </select>
+        <button id="gemini-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
+          <span class="btn-text">🔄 APIキーでモデル一覧を取得</span>
+        </button>
+      </div>
+
+      <!-- LM Studio モデル選択 -->
+      <div class="field hidden" id="lmstudio-model-field">
+        <label class="label" for="lmstudio-model-select">
+          <span class="label-icon">🤖</span>
+          モデル
+        </label>
+        <select id="lmstudio-model-select" class="select">
+          <option value="translategemma-4b-it">TranslateGemma 4B (読み込み中…)</option>
+        </select>
+        <button id="lmstudio-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
+          <span class="btn-text">🔄 LM Studio からモデル一覧を再取得</span>
+        </button>
+      </div>
+
+      <!-- LM Studio ソース言語 -->
+      <div class="field hidden" id="lmstudio-source-lang-field">
+        <label class="label" for="lmstudio-source-lang">
+          <span class="label-icon">🔤</span>
+          翻訳元の言語（ページ側）
+        </label>
+        <select id="lmstudio-source-lang" class="select">
+          <option value="en">English (en)</option>
+          <option value="ja">Japanese (ja)</option>
+          <option value="zh">Chinese (zh)</option>
+          <option value="ko">Korean (ko)</option>
+          <option value="fr">French (fr)</option>
+          <option value="de">German (de)</option>
+          <option value="es">Spanish (es)</option>
+          <option value="pt">Portuguese (pt)</option>
+          <option value="it">Italian (it)</option>
+          <option value="ru">Russian (ru)</option>
+          <option value="ar">Arabic (ar)</option>
+          <option value="hi">Hindi (hi)</option>
+          <option value="vi">Vietnamese (vi)</option>
+          <option value="th">Thai (th)</option>
+          <option value="id">Indonesian (id)</option>
+          <option value="tr">Turkish (tr)</option>
+          <option value="nl">Dutch (nl)</option>
+          <option value="pl">Polish (pl)</option>
+          <option value="sv">Swedish (sv)</option>
+          <option value="cs">Czech (cs)</option>
+          <option value="el">Greek (el)</option>
+          <option value="he">Hebrew (he)</option>
+        </select>
+      </div>
+
+      <!-- OpenRouter モデル選択 -->
+      <div class="field hidden" id="openrouter-model-field">
+        <label class="label" for="openrouter-model-select">
+          <span class="label-icon">🤖</span>
+          モデル
+        </label>
+        <select id="openrouter-model-select" class="select">
+          <optgroup label="無料モデル">
+            <option value="google/gemma-4-31b-it:free">Gemma 4 31B（無料）</option>
+            <option value="google/gemma-4-26b-a4b-it:free">Gemma 4 26B（無料）</option>
+            <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 120B（無料）</option>
+            <option value="minimax/minimax-m2.5:free">Minimax M2.5（無料）</option>
+          </optgroup>
+          <optgroup label="Google Gemini">
+            <option value="google/gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite（高速）</option>
+            <option value="google/gemini-3-flash-preview">Gemini 3 Flash（バランス）</option>
+            <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro（高精度）</option>
+          </optgroup>
+          <optgroup label="OpenAI">
+            <option value="openai/gpt-5.4-nano">GPT-5.4 Nano（最速・低コスト）</option>
+            <option value="openai/gpt-5.4-mini">GPT-5.4 Mini（高速）</option>
+            <option value="openai/gpt-5.4">GPT-5.4（バランス）</option>
+          </optgroup>
+          <optgroup label="Anthropic">
+            <option value="anthropic/claude-sonnet-4.6">Claude Sonnet 4.6（バランス）</option>
+            <option value="anthropic/claude-opus-4.6">Claude Opus 4.6（高精度）</option>
+          </optgroup>
+          <optgroup label="meta-llama">
+            <option value="meta-llama/llama-4-scout">Llama 4 Scout 17B | $0.08/1M</option>
+            <option value="meta-llama/llama-4-maverick">Llama 4 Maverick 17B | $0.18/1M</option>
+            <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B | $0.12/1M</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <!-- SambaNova モデル選択 -->
+      <div class="field hidden" id="sambanova-model-field">
+        <label class="label" for="sambanova-model-select">
+          <span class="label-icon">🤖</span>
+          モデル
+        </label>
+        <select id="sambanova-model-select" class="select">
+          <option value="DeepSeek-V3.1">DeepSeek-V3.1（推奨）</option>
+          <option value="Meta-Llama-3.3-70B-Instruct">Meta-Llama-3.3-70B-Instruct</option>
+          <option value="Meta-Llama-3.1-8B-Instruct">Meta-Llama-3.1-8B-Instruct</option>
+          <option value="MiniMax-M2.5">MiniMax-M2.5</option>
+          <option value="gpt-oss-120b">gpt-oss-120b</option>
+          <option value="Qwen3-32B">Qwen3-32B</option>
+        </select>
+        <button id="sambanova-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
+          <span class="btn-text">🔄 APIでモデル一覧を取得</span>
+        </button>
       </div>
 
       <div class="field">
@@ -92,8 +277,17 @@
       </button>
 
       <button id="clear-cache" class="btn btn-warning btn-sm">
-        <span class="btn-text">🗑 翻訳キャッシュをクリア</span>
+        <span class="btn-text">🗑 全キャッシュをクリア</span>
       </button>
+      <div id="cache-sites-panel" class="cache-sites-panel">
+        <div class="cache-sites-header">
+          <span class="cache-sites-title">📦 サイト別キャッシュ</span>
+          <button id="toggle-cache-sites" class="btn btn-outline btn-xs">
+            <span class="btn-text">▼ 表示</span>
+          </button>
+        </div>
+        <div id="cache-sites-list" class="cache-sites-list" style="display:none;"></div>
+      </div>
 
       <div class="field toggle-field">
         <label class="toggle-label" for="auto-translate">
@@ -105,6 +299,7 @@
           <span class="toggle-slider"></span>
         </label>
       </div>
+      <p class="warning-text">⚠️ 自動翻訳を有効にすると、ページを開くたびにAPIが呼び出され、コストが発生します。レート制限にもご注意ください。</p>
 
       <div class="field toggle-field">
         <label class="toggle-label" for="verbose-log">
@@ -203,7 +398,7 @@
 
     <!-- フッター -->
     <footer class="footer">
-      <p>Gemini API を使用したAI翻訳</p>
+      <p>複数のLLM APIを使用したAI翻訳</p>
     </footer>
   </div>
 
