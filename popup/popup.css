@@ -52,9 +52,10 @@
 
 /* Base */
 body {
-  width: 360px;
+  width: 380px;
+  min-width: 380px; max-width: 380px;
   min-height: 200px;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Kaku Gothic ProN', 'Yu Gothic', sans-serif;
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow-x: hidden;
@@ -66,18 +67,7 @@ body {
   position: relative;
 }
 
-.container::before {
-  content: '';
-  position: absolute;
-  top: -50%;
-  left: -50%;
-  width: 200%;
-  height: 200%;
-  background: radial-gradient(ellipse at 30% 20%, rgba(0, 54, 114, 0.05) 0%, transparent 50%),
-    radial-gradient(ellipse at 70% 80%, rgba(92, 111, 139, 0.04) 0%, transparent 50%);
-  pointer-events: none;
-  z-index: 0;
-}
+
 
 /* Header */
 .header {
@@ -138,7 +128,7 @@ body {
   font-weight: 600;
   color: var(--text-secondary);
   margin-bottom: 6px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.5px;
 }
 
@@ -155,6 +145,8 @@ body {
 
 .input {
   flex: 1;
+  min-width: 0;
+  width: 100%;
   padding: 10px 14px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
@@ -650,7 +642,7 @@ body {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.5px;
 }
 
@@ -692,7 +684,7 @@ body {
   border-radius: 3px;
   font-size: 9px;
   font-weight: 700;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.3px;
 }
 
@@ -758,7 +750,7 @@ body {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.5px;
 }
 
@@ -788,7 +780,7 @@ body {
   font-size: 11px;
   color: var(--text-secondary);
   font-weight: 600;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.4px;
 }
 
@@ -833,7 +825,7 @@ body {
 .usage-stat-label {
   font-size: 9px;
   color: var(--text-muted);
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.3px;
 }
 
@@ -1071,4 +1063,38 @@ body {
 .btn-danger:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Chrome sizes action popups from intrinsic content. Keep the root width
+   independent of the initial viewport; vw constraints can collapse it. */
+html { width: 380px; min-width: 380px; max-width: 380px; overflow-x: hidden; }
+body { max-height: 600px; overflow-y: auto; }
+:root { --text-tertiary: #5c6f8b; --text-muted: #63758b; }
+.container { width: 100%; min-width: 0; }
+.header { padding: 14px 16px; background: #edf3f8; }
+.logo { gap: 10px; }
+.logo-icon { width: 32px; height: 32px; box-shadow: none; }
+.title { font-size: 17px; background: none; -webkit-text-fill-color: currentColor; }
+.subtitle { margin-top: 3px; letter-spacing: 0; }
+.section { padding: 12px 16px; }
+#translate-section { border-bottom: 1px solid var(--border-color); background: #fff; }
+#translate-section .warning-text { background: none; border: none; padding: 0; color: var(--text-secondary); }
+#settings-section { padding-top: 16px; }
+.field { margin-bottom: 12px; }
+.label { letter-spacing: 0; }
+.input, .select { min-height: 36px; }
+.btn { padding: 10px 14px; border-radius: 8px; }
+.btn::before { content: none; }
+.btn-primary { background: var(--accent-primary); box-shadow: none; }
+.btn-primary:hover:not(:disabled) { transform: none; box-shadow: none; background: #164b83; }
+#save-settings { margin-bottom: 0; }
+.maintenance { border-top: 1px solid var(--border-color); }
+.maintenance summary { padding: 14px 16px; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.maintenance[open] summary { border-bottom: 1px solid var(--border-color); }
+.maintenance .section { padding-top: 8px; padding-bottom: 8px; }
+.footer { padding: 10px 16px; }
+button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid var(--accent-primary); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
 }

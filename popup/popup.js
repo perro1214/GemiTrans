@@ -1,3 +1,6 @@
+function normalizeContextParallelism(value) {
+    return Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 6 ? Number(value) : 3;
+}
 /**
  * Popup Script
  * ポップアップUIのロジック
@@ -32,7 +35,52 @@ const elements = {
     sambanovaModelField: document.getElementById('sambanova-model-field'),
     sambanovaModelSelect: document.getElementById('sambanova-model-select'),
     sambanovaRefresh: document.getElementById('sambanova-refresh'),
-    // LM Studio
+    // NVIDIA
+    nvidiaKeyField: document.getElementById('nvidia-key-field'),
+    nvidiaApiKey: document.getElementById('nvidia-api-key'),
+    toggleNvidiaKey: document.getElementById('toggle-nvidia-key'),
+    toggleNvidiaIcon: document.getElementById('toggle-nvidia-icon'),
+    nvidiaKeyStatus: document.getElementById('nvidia-key-status'),
+    nvidiaModelField: document.getElementById('nvidia-model-field'),
+    nvidiaModelSelect: document.getElementById('nvidia-model-select'),
+    nvidiaRefresh: document.getElementById('nvidia-refresh'),
+    // Cerebras
+    cerebrasKeyField: document.getElementById('cerebras-key-field'),
+    cerebrasApiKey: document.getElementById('cerebras-api-key'),
+    toggleCerebrasKey: document.getElementById('toggle-cerebras-key'),
+    toggleCerebrasIcon: document.getElementById('toggle-cerebras-icon'),
+    cerebrasKeyStatus: document.getElementById('cerebras-key-status'),
+    cerebrasModelField: document.getElementById('cerebras-model-field'),
+    cerebrasModelSelect: document.getElementById('cerebras-model-select'),
+    cerebrasRefresh: document.getElementById('cerebras-refresh'),
+    // PlaMo
+    plamoKeyField: document.getElementById('plamo-key-field'),
+    plamoApiKey: document.getElementById('plamo-api-key'),
+    togglePlamoKey: document.getElementById('toggle-plamo-key'),
+    togglePlamoIcon: document.getElementById('toggle-plamo-icon'),
+    plamoKeyStatus: document.getElementById('plamo-key-status'),
+    plamoModelField: document.getElementById('plamo-model-field'),
+    plamoModelSelect: document.getElementById('plamo-model-select'),
+    plamoRefresh: document.getElementById('plamo-refresh'),
+    // OpenCode Go
+    opencodeGoKeyField: document.getElementById('opencode-go-key-field'),
+    opencodeGoApiKey: document.getElementById('opencode-go-api-key'),
+    toggleOpencodeGoKey: document.getElementById('toggle-opencode-go-key'),
+    toggleOpencodeGoIcon: document.getElementById('toggle-opencode-go-icon'),
+    opencodeGoKeyStatus: document.getElementById('opencode-go-key-status'),
+    opencodeGoModelField: document.getElementById('opencode-go-model-field'),
+    opencodeGoModelSelect: document.getElementById('opencode-go-model-select'),
+    opencodeGoRefresh: document.getElementById('opencode-go-refresh'),
+    // ロリポップ！AI Gateway
+    lolipopKeyField: document.getElementById('lolipop-key-field'),
+    lolipopApiKey: document.getElementById('lolipop-api-key'),
+    toggleLolipopKey: document.getElementById('toggle-lolipop-key'),
+    toggleLolipopIcon: document.getElementById('toggle-lolipop-icon'),
+    lolipopKeyStatus: document.getElementById('lolipop-key-status'),
+    lolipopModelField: document.getElementById('lolipop-model-field'),
+    lolipopModelSelect: document.getElementById('lolipop-model-select'),
+    lolipopRefresh: document.getElementById('lolipop-refresh'),
+    // ローカルAPI
     lmstudioEndpointField: document.getElementById('lmstudio-endpoint-field'),
     lmstudioEndpoint: document.getElementById('lmstudio-endpoint'),
     lmstudioKeyStatus: document.getElementById('lmstudio-key-status'),
@@ -44,7 +92,13 @@ const elements = {
     // 共通
     targetLang: document.getElementById('target-lang'),
     batchSize: document.getElementById('batch-size'),
+    googlePreviewEnabled: document.getElementById('google-preview-enabled'),
+    googleTranslateApiKey: document.getElementById('google-translate-api-key'),
+    contextAwareParallel: document.getElementById('context-aware-parallel'),
+    contextParallelism: document.getElementById('context-parallelism'),
     saveSettings: document.getElementById('save-settings'),
+    translationUnderline: document.getElementById('translation-underline'),
+    originalTooltip: document.getElementById('original-tooltip'),
     autoTranslate: document.getElementById('auto-translate'),
     verboseLog: document.getElementById('verbose-log'),
     translateBtn: document.getElementById('translate-btn'),
@@ -81,7 +135,7 @@ const settingsStorage = chrome.storage.local;
 const MESSAGE_TIMEOUT_MS = 30000;
 
 function normalizeProvider(provider) {
-    if (provider === 'groq' || provider === 'cerebras') return 'gemini';
+    if (provider === 'groq') return 'gemini';
     return provider || 'gemini';
 }
 
@@ -93,23 +147,19 @@ async function cleanupRemovedProviderSettings() {
     const result = await settingsStorage.get([
         'apiProvider',
         'groqApiKey',
-        'groqModel',
-        'cerebrasApiKey',
-        'cerebrasModel'
+        'groqModel'
     ]);
 
     const updates = {};
     const removeKeys = [];
     const normalizedProvider = normalizeProvider(result.apiProvider);
 
-    if ((result.apiProvider === 'groq' || result.apiProvider === 'cerebras') && normalizedProvider !== result.apiProvider) {
+    if (result.apiProvider === 'groq' && normalizedProvider !== result.apiProvider) {
         updates.apiProvider = normalizedProvider;
     }
 
     if (result.groqApiKey !== undefined) removeKeys.push('groqApiKey');
     if (result.groqModel !== undefined) removeKeys.push('groqModel');
-    if (result.cerebrasApiKey !== undefined) removeKeys.push('cerebrasApiKey');
-    if (result.cerebrasModel !== undefined) removeKeys.push('cerebrasModel');
 
     if (removeKeys.length > 0) {
         await settingsStorage.remove(removeKeys);
@@ -142,8 +192,12 @@ async function loadSettings() {
         const result = await settingsStorage.get([
             'apiKey', 'openrouterApiKey', 'apiProvider',
             'targetLang', 'model', 'openrouterModel', 'sambanovaApiKey', 'sambanovaModel',
+            'nvidiaApiKey', 'nvidiaModel', 'cerebrasApiKey', 'cerebrasModel', 'plamoApiKey', 'plamoModel',
+            'opencodeGoApiKey', 'opencodeGoModel',
+            'lolipopApiKey', 'lolipopModel',
             'lmstudioEndpoint', 'lmstudioModel', 'lmstudioSourceLang',
-            'autoTranslate', 'batchMaxChars', 'verboseLog'
+            'translationUnderline', 'originalTooltip', 'autoTranslate', 'batchMaxChars', 'verboseLog', 'contextAwareParallel', 'contextParallelism',
+            'googlePreviewEnabled', 'googleTranslateApiKey'
         ]);
 
         // プロバイダー設定
@@ -162,6 +216,26 @@ async function loadSettings() {
         if (result.sambanovaApiKey) {
             elements.sambanovaApiKey.value = result.sambanovaApiKey;
         }
+        if (result.nvidiaApiKey) {
+            elements.nvidiaApiKey.value = result.nvidiaApiKey;
+        }
+        if (result.cerebrasApiKey) {
+            elements.cerebrasApiKey.value = result.cerebrasApiKey;
+        }
+        if (result.plamoApiKey) {
+            elements.plamoApiKey.value = result.plamoApiKey;
+        }
+        if (result.opencodeGoApiKey) {
+            elements.opencodeGoApiKey.value = result.opencodeGoApiKey;
+        }
+        elements.lolipopApiKey.value = result.lolipopApiKey || '';
+        if (result.lolipopModel) {
+            const option = document.createElement('option');
+            option.value = result.lolipopModel;
+            option.textContent = result.lolipopModel;
+            elements.lolipopModelSelect.replaceChildren(option);
+            elements.lolipopModelSelect.value = result.lolipopModel;
+        }
 
         if (result.lmstudioEndpoint) {
             elements.lmstudioEndpoint.value = result.lmstudioEndpoint;
@@ -175,6 +249,11 @@ async function loadSettings() {
         let activeKey;
         if (provider === 'openrouter') activeKey = result.openrouterApiKey;
         else if (provider === 'sambanova') activeKey = result.sambanovaApiKey;
+        else if (provider === 'nvidia') activeKey = result.nvidiaApiKey;
+        else if (provider === 'cerebras') activeKey = result.cerebrasApiKey;
+        else if (provider === 'plamo') activeKey = result.plamoApiKey;
+        else if (provider === 'opencodego') activeKey = result.opencodeGoApiKey;
+        else if (provider === 'lolipop') activeKey = result.lolipopApiKey && result.lolipopModel;
         else if (provider === 'lmstudio') activeKey = result.lmstudioEndpoint || elements.lmstudioEndpoint.value;
         else activeKey = result.apiKey;
         if (activeKey) {
@@ -203,14 +282,47 @@ async function loadSettings() {
             elements.sambanovaModelSelect.value = result.sambanovaModel;
         }
 
+        if (provider === 'nvidia') {
+            await loadNvidiaModels(result.nvidiaModel);
+        } else if (result.nvidiaModel && [...elements.nvidiaModelSelect.options].some(o => o.value === result.nvidiaModel)) {
+            elements.nvidiaModelSelect.value = result.nvidiaModel;
+        }
+        if (provider === 'cerebras') {
+            await loadCerebrasModels(result.cerebrasModel);
+        } else if (result.cerebrasModel && [...elements.cerebrasModelSelect.options].some(o => o.value === result.cerebrasModel)) {
+            elements.cerebrasModelSelect.value = result.cerebrasModel;
+        }
+
+        if (provider === 'plamo') {
+            await loadPlaMoModels(result.plamoModel);
+        } else if (result.plamoModel && [...elements.plamoModelSelect.options].some(o => o.value === result.plamoModel)) {
+            elements.plamoModelSelect.value = result.plamoModel;
+        }
+
+        if (provider === 'opencodego') {
+            await loadOpenCodeGoModels(result.opencodeGoModel);
+        } else if (result.opencodeGoModel && [...elements.opencodeGoModelSelect.options].some(o => o.value === result.opencodeGoModel)) {
+            elements.opencodeGoModelSelect.value = result.opencodeGoModel;
+        }
+
         if (provider === 'lmstudio') {
             await loadLMStudioModels(result.lmstudioModel);
+        }
+        if (provider === 'lolipop') {
+            await loadLolipopModels(result.lolipopApiKey, result.lolipopModel);
         }
 
         if (result.batchMaxChars !== undefined) {
             elements.batchSize.value = String(result.batchMaxChars);
         }
 
+        elements.googlePreviewEnabled.checked = !!result.googlePreviewEnabled;
+        elements.googleTranslateApiKey.value = result.googleTranslateApiKey || '';
+        elements.contextParallelism.value = String(normalizeContextParallelism(result.contextParallelism));
+        elements.contextAwareParallel.checked = !!result.contextAwareParallel;
+        elements.contextParallelism.disabled = !elements.contextAwareParallel.checked;
+        elements.translationUnderline.checked = result.translationUnderline !== false;
+        elements.originalTooltip.checked = result.originalTooltip !== false;
         elements.autoTranslate.checked = !!result.autoTranslate;
         elements.verboseLog.checked = !!result.verboseLog;
     } catch (error) {
@@ -224,6 +336,11 @@ async function loadSettings() {
 function updateProviderUI(provider) {
     const isOpenRouter = provider === 'openrouter';
     const isSambaNova = provider === 'sambanova';
+    const isNvidia = provider === 'nvidia';
+    const isCerebras = provider === 'cerebras';
+    const isPlaMo = provider === 'plamo';
+    const isOpenCodeGo = provider === 'opencodego';
+    const isLolipop = provider === 'lolipop';
     const isLMStudio = provider === 'lmstudio';
     const isGemini = provider === 'gemini';
 
@@ -233,6 +350,16 @@ function updateProviderUI(provider) {
     elements.openrouterModelField.classList.toggle('hidden', !isOpenRouter);
     elements.sambanovaKeyField.classList.toggle('hidden', !isSambaNova);
     elements.sambanovaModelField.classList.toggle('hidden', !isSambaNova);
+    elements.nvidiaKeyField.classList.toggle('hidden', !isNvidia);
+    elements.nvidiaModelField.classList.toggle('hidden', !isNvidia);
+    elements.cerebrasKeyField.classList.toggle('hidden', !isCerebras);
+    elements.cerebrasModelField.classList.toggle('hidden', !isCerebras);
+    elements.plamoKeyField.classList.toggle('hidden', !isPlaMo);
+    elements.plamoModelField.classList.toggle('hidden', !isPlaMo);
+    elements.opencodeGoKeyField.classList.toggle('hidden', !isOpenCodeGo);
+    elements.opencodeGoModelField.classList.toggle('hidden', !isOpenCodeGo);
+    elements.lolipopKeyField.classList.toggle('hidden', !isLolipop);
+    elements.lolipopModelField.classList.toggle('hidden', !isLolipop);
     elements.lmstudioEndpointField.classList.toggle('hidden', !isLMStudio);
     elements.lmstudioModelField.classList.toggle('hidden', !isLMStudio);
     elements.lmstudioSourceLangField.classList.toggle('hidden', !isLMStudio);
@@ -320,8 +447,18 @@ async function loadGeminiModels(apiKey, savedModel) {
 }
 
 /**
- * LM Studio のモデル一覧を取得してドロップダウンを構築する
+ * ローカルAPI のモデル一覧を取得してドロップダウンを構築する
  */
+const LMSTUDIO_FALLBACK_MODELS = [
+    { id: 'gemitrans-gemma4-e2b', name: 'Gemma 4 E2B QAT (GTX 1080 high-speed)' },
+    { id: 'gemitrans-hymt2-1.8b', name: 'Hy-MT2 1.8B (GTX 1080 high-speed)' },
+    { id: 'gemitrans-gemma4', name: 'Gemma 4 26B A4B (GTX 1080 optimized)' },
+    { id: 'mlx-community/Hy-MT2-1.8B-4bit', name: 'Hy-MT2 1.8B 4bit (MLX)' },
+    { id: 'mlx-community/Hy-MT2-7B-4bit', name: 'Hy-MT2 7B 4bit (MLX)' },
+    { id: 'tencent/Hy-MT2-7B-GGUF:Q4_K_M', name: 'Hy-MT2 7B Q4_K_M (GGUF)' },
+    { id: 'translategemma-4b-it', name: 'TranslateGemma 4B' }
+];
+
 async function loadLMStudioModels(savedModel) {
     const select = elements.lmstudioModelSelect;
     const endpoint = (elements.lmstudioEndpoint.value || 'http://localhost:1234').replace(/\/+$/, '');
@@ -334,10 +471,12 @@ async function loadLMStudioModels(savedModel) {
 
         select.innerHTML = '';
         if (models.length === 0) {
-            const opt = document.createElement('option');
-            opt.value = 'translategemma-4b-it';
-            opt.textContent = 'translategemma-4b-it (未ロード)';
-            select.appendChild(opt);
+            LMSTUDIO_FALLBACK_MODELS.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = `${m.name} (未ロード)`;
+                select.appendChild(opt);
+            });
         } else {
             models.forEach(m => {
                 const opt = document.createElement('option');
@@ -351,20 +490,34 @@ async function loadLMStudioModels(savedModel) {
         if (savedModel && [...select.options].some(o => o.value === savedModel)) {
             select.value = savedModel;
         } else {
-            const tg = [...select.options].find(o => /translategemma/i.test(o.value));
-            if (tg) select.value = tg.value;
+            const preferred = [...select.options].find(o => /gemitrans-gemma4-e2b/i.test(o.value))
+                || [...select.options].find(o => /gemitrans-hymt2-1\.8b/i.test(o.value))
+                || [...select.options].find(o => /gemitrans-gemma4/i.test(o.value))
+                || [...select.options].find(o => /hy[-_]?mt2.*1\.8b.*4bit/i.test(o.value))
+                || [...select.options].find(o => /hy[-_]?mt2.*7b.*4bit/i.test(o.value))
+                || [...select.options].find(o => /hy[-_]?mt2/i.test(o.value))
+                || [...select.options].find(o => /translategemma/i.test(o.value));
+            if (preferred) select.value = preferred.value;
         }
         showLMStudioKeyStatus(`✅ ${models.length}件のモデルが見つかりました`, 'success');
     } catch (error) {
-        select.innerHTML = '<option value="translategemma-4b-it">translategemma-4b-it</option>';
-        if (savedModel) {
+        select.innerHTML = '';
+        LMSTUDIO_FALLBACK_MODELS.forEach(m => {
             const opt = document.createElement('option');
-            opt.value = savedModel;
-            opt.textContent = savedModel;
+            opt.value = m.id;
+            opt.textContent = m.name;
             select.appendChild(opt);
+        });
+        if (savedModel) {
+            if (![...select.options].some(o => o.value === savedModel)) {
+                const opt = document.createElement('option');
+                opt.value = savedModel;
+                opt.textContent = savedModel;
+                select.appendChild(opt);
+            }
             select.value = savedModel;
         }
-        showLMStudioKeyStatus(`⚠️ LM Studio に接続できません: ${error.message}`, 'error');
+        showLMStudioKeyStatus(`⚠️ ローカルAPIに接続できません: ${error.message}`, 'error');
     }
 }
 
@@ -388,6 +541,122 @@ const SAMBANOVA_MODEL_PREFERENCE = [
     'Qwen3-32B',
     'Llama-4-Maverick-17B-128E-Instruct'
 ];
+
+const NVIDIA_FALLBACK_MODELS = [
+    { id: 'meta/llama-3.1-70b-instruct', name: 'meta/llama-3.1-70b-instruct（推奨）' },
+    { id: 'meta/llama-3.1-8b-instruct', name: 'meta/llama-3.1-8b-instruct' },
+    { id: 'nvidia/llama-3.1-nemotron-70b-instruct', name: 'nvidia/llama-3.1-nemotron-70b-instruct' }
+];
+
+const NVIDIA_MODEL_PREFERENCE = [
+    'meta/llama-3.1-70b-instruct',
+    'meta/llama-3.1-8b-instruct',
+    'nvidia/llama-3.1-nemotron-70b-instruct'
+];
+
+const CEREBRAS_FALLBACK_MODELS = [
+    { id: 'llama-3.3-70b', name: 'llama-3.3-70b（推奨）' },
+    { id: 'llama-3.1-8b', name: 'llama-3.1-8b' },
+    { id: 'qwen-3-32b', name: 'qwen-3-32b' }
+];
+
+const PLAMO_FALLBACK_MODELS = [
+    { id: 'plamo-2.0-prime', name: 'plamo-2.0-prime（推奨）' }
+];
+
+const OPENCODE_GO_MODEL_LABELS = {
+    'qwen3.5-plus': 'Qwen3.5 Plus（推奨）',
+    'qwen3.6-plus': 'Qwen3.6 Plus',
+    'kimi-k2.6': 'Kimi K2.6',
+    'kimi-k2.5': 'Kimi K2.5',
+    'deepseek-v4-flash': 'DeepSeek V4 Flash',
+    'deepseek-v4-pro': 'DeepSeek V4 Pro',
+    'glm-5': 'GLM-5',
+    'glm-5.1': 'GLM-5.1',
+    'mimo-v2.5': 'MiMo-V2.5',
+    'mimo-v2.5-pro': 'MiMo-V2.5-Pro',
+    'mimo-v2-pro': 'MiMo-V2-Pro',
+    'mimo-v2-omni': 'MiMo-V2-Omni',
+    'hy3-preview': 'HY3 Preview',
+    'minimax-m2.7': 'MiniMax M2.7',
+    'minimax-m2.5': 'MiniMax M2.5'
+};
+
+const OPENCODE_GO_FALLBACK_MODELS = [
+    { id: 'qwen3.5-plus', name: 'Qwen3.5 Plus（推奨）' },
+    { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus' },
+    { id: 'kimi-k2.6', name: 'Kimi K2.6' },
+    { id: 'kimi-k2.5', name: 'Kimi K2.5' },
+    { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+    { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+    { id: 'glm-5', name: 'GLM-5' },
+    { id: 'glm-5.1', name: 'GLM-5.1' },
+    { id: 'mimo-v2.5', name: 'MiMo-V2.5' },
+    { id: 'mimo-v2.5-pro', name: 'MiMo-V2.5-Pro' },
+    { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
+    { id: 'minimax-m2.5', name: 'MiniMax M2.5' }
+];
+
+const OPENCODE_GO_MODEL_PREFERENCE = [
+    'qwen3.5-plus',
+    'qwen3.6-plus',
+    'kimi-k2.6',
+    'kimi-k2.5',
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
+    'glm-5',
+    'glm-5.1',
+    'mimo-v2.5',
+    'mimo-v2.5-pro',
+    'minimax-m2.7',
+    'minimax-m2.5'
+];
+
+function isNvidiaChatModel(modelId) {
+    const id = String(modelId || '').toLowerCase();
+    if (!id) return false;
+    if (id.includes('embed')) return false;
+    if (id.includes('rerank')) return false;
+    if (id.includes('vision')) return false;
+    if (id.includes('tts')) return false;
+    if (id.includes('asr')) return false;
+    return true;
+}
+
+function isCerebrasChatModel(modelId) {
+    const id = String(modelId || '').toLowerCase();
+    if (!id) return false;
+    if (id.includes('embed')) return false;
+    if (id.includes('whisper')) return false;
+    if (id.includes('tts')) return false;
+    if (id.includes('asr')) return false;
+    return true;
+}
+
+function isPlaMoChatModel(modelId) {
+    const id = String(modelId || '').toLowerCase();
+    return id.startsWith('plamo-');
+}
+
+function sortOpenCodeGoModels(models) {
+    const order = new Map(OPENCODE_GO_MODEL_PREFERENCE.map((id, index) => [id, index]));
+    return [...models].sort((a, b) => {
+        const ai = order.has(a.id) ? order.get(a.id) : Number.MAX_SAFE_INTEGER;
+        const bi = order.has(b.id) ? order.get(b.id) : Number.MAX_SAFE_INTEGER;
+        if (ai !== bi) return ai - bi;
+        return a.id.localeCompare(b.id);
+    });
+}
+
+function sortNvidiaModels(models) {
+    const order = new Map(NVIDIA_MODEL_PREFERENCE.map((id, index) => [id, index]));
+    return [...models].sort((a, b) => {
+        const ai = order.has(a.id) ? order.get(a.id) : Number.MAX_SAFE_INTEGER;
+        const bi = order.has(b.id) ? order.get(b.id) : Number.MAX_SAFE_INTEGER;
+        if (ai !== bi) return ai - bi;
+        return a.id.localeCompare(b.id);
+    });
+}
 
 function isSambaNovaChatModel(modelId) {
     const id = String(modelId || '').toLowerCase();
@@ -468,6 +737,281 @@ async function loadSambaNovaModels(savedModel) {
         if (error.name !== 'AbortError') {
             showSambanovaKeyStatus(`⚠️ モデル取得失敗: ${error.message}`, 'error');
         }
+    }
+}
+
+async function loadNvidiaModels(savedModel) {
+    const select = elements.nvidiaModelSelect;
+    select.innerHTML = '<option disabled selected>読み込み中...</option>';
+    const apiKey = elements.nvidiaApiKey.value.trim();
+
+    const applyModels = (models) => {
+        select.innerHTML = '';
+        models.forEach(model => {
+            const opt = document.createElement('option');
+            opt.value = model.id;
+            opt.textContent = model.name || model.id;
+            select.appendChild(opt);
+        });
+        if (savedModel && [...select.options].some(o => o.value === savedModel)) {
+            select.value = savedModel;
+        } else if (select.options.length > 0) {
+            select.selectedIndex = 0;
+        }
+    };
+
+    if (!apiKey) {
+        applyModels(NVIDIA_FALLBACK_MODELS);
+        return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+        const response = await fetch('https://integrate.api.nvidia.com/v1/models', {
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData?.error?.message || errData?.message || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const models = sortNvidiaModels((data.data || [])
+            .filter(m => m.id && isNvidiaChatModel(m.id))
+            .map(m => ({ id: m.id, name: m.id }))
+        );
+        if (models.length === 0) {
+            throw new Error('利用可能なチャットモデルがありません');
+        }
+        applyModels(models);
+        showNvidiaKeyStatus(`✅ ${models.length}件のモデルを取得しました`, 'success');
+    } catch (error) {
+        clearTimeout(timeoutId);
+        applyModels(NVIDIA_FALLBACK_MODELS);
+        if (error.name !== 'AbortError') {
+            showNvidiaKeyStatus(`⚠️ モデル取得失敗: ${error.message}`, 'error');
+        }
+    }
+}
+
+async function loadCerebrasModels(savedModel) {
+    const select = elements.cerebrasModelSelect;
+    select.innerHTML = '<option disabled selected>読み込み中...</option>';
+    const apiKey = elements.cerebrasApiKey.value.trim();
+
+    const applyModels = (models) => {
+        select.innerHTML = '';
+        models.forEach(model => {
+            const opt = document.createElement('option');
+            opt.value = model.id;
+            opt.textContent = model.name || model.id;
+            select.appendChild(opt);
+        });
+        if (savedModel && [...select.options].some(o => o.value === savedModel)) {
+            select.value = savedModel;
+        } else if (select.options.length > 0) {
+            select.selectedIndex = 0;
+        }
+    };
+
+    if (!apiKey) {
+        applyModels(CEREBRAS_FALLBACK_MODELS);
+        return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+        const response = await fetch('https://api.cerebras.ai/v1/models', {
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData?.error?.message || errData?.message || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const models = (data.data || [])
+            .filter(m => m.id && isCerebrasChatModel(m.id))
+            .map(m => ({ id: m.id, name: m.id }))
+            .sort((a, b) => a.id.localeCompare(b.id));
+        if (models.length === 0) {
+            throw new Error('利用可能なチャットモデルがありません');
+        }
+        applyModels(models);
+        showCerebrasKeyStatus(`✅ ${models.length}件のモデルを取得しました`, 'success');
+    } catch (error) {
+        clearTimeout(timeoutId);
+        applyModels(CEREBRAS_FALLBACK_MODELS);
+        if (error.name !== 'AbortError') {
+            showCerebrasKeyStatus(`⚠️ モデル取得失敗: ${error.message}`, 'error');
+        }
+    }
+}
+
+async function loadPlaMoModels(savedModel) {
+    const select = elements.plamoModelSelect;
+    select.innerHTML = '<option disabled selected>読み込み中...</option>';
+    const apiKey = elements.plamoApiKey.value.trim();
+
+    const applyModels = (models) => {
+        select.innerHTML = '';
+        models.forEach(model => {
+            const opt = document.createElement('option');
+            opt.value = model.id;
+            opt.textContent = model.name || model.id;
+            select.appendChild(opt);
+        });
+        if (savedModel && [...select.options].some(o => o.value === savedModel)) {
+            select.value = savedModel;
+        } else if (select.options.length > 0) {
+            select.selectedIndex = 0;
+        }
+    };
+
+    if (!apiKey) {
+        applyModels(PLAMO_FALLBACK_MODELS);
+        return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+        const response = await fetch('https://api.platform.preferredai.jp/v1/models', {
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData?.error?.message || errData?.message || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const models = (data.data || [])
+            .filter(m => m.id && isPlaMoChatModel(m.id))
+            .map(m => ({ id: m.id, name: m.id }))
+            .sort((a, b) => a.id.localeCompare(b.id));
+        if (models.length === 0) {
+            throw new Error('利用可能なチャットモデルがありません');
+        }
+        applyModels(models);
+        showPlaMoKeyStatus(`✅ ${models.length}件のモデルを取得しました`, 'success');
+    } catch (error) {
+        clearTimeout(timeoutId);
+        applyModels(PLAMO_FALLBACK_MODELS);
+        if (error.name !== 'AbortError') {
+            showPlaMoKeyStatus(`⚠️ モデル取得失敗: ${error.message}`, 'error');
+        }
+    }
+}
+
+async function loadOpenCodeGoModels(savedModel) {
+    const select = elements.opencodeGoModelSelect;
+    select.innerHTML = '<option disabled selected>読み込み中...</option>';
+
+    const applyModels = (models) => {
+        select.innerHTML = '';
+        models.forEach(model => {
+            const opt = document.createElement('option');
+            opt.value = model.id;
+            opt.textContent = model.name || OPENCODE_GO_MODEL_LABELS[model.id] || model.id;
+            select.appendChild(opt);
+        });
+        if (savedModel && [...select.options].some(o => o.value === savedModel)) {
+            select.value = savedModel;
+        } else if ([...select.options].some(o => o.value === 'qwen3.5-plus')) {
+            select.value = 'qwen3.5-plus';
+        } else if (select.options.length > 0) {
+            select.selectedIndex = 0;
+        }
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+        const response = await fetch('https://opencode.ai/zen/go/v1/models', {
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData?.error?.message || errData?.message || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const models = sortOpenCodeGoModels((data.data || [])
+            .filter(m => m.id)
+            .map(m => ({ id: m.id, name: OPENCODE_GO_MODEL_LABELS[m.id] || m.id }))
+        );
+        if (models.length === 0) {
+            throw new Error('利用可能なモデルがありません');
+        }
+        applyModels(models);
+        showOpenCodeGoKeyStatus(`✅ ${models.length}件のモデルを取得しました`, 'success');
+    } catch (error) {
+        clearTimeout(timeoutId);
+        applyModels(OPENCODE_GO_FALLBACK_MODELS);
+        if (error.name !== 'AbortError') {
+            showOpenCodeGoKeyStatus(`⚠️ モデル取得失敗: ${error.message}`, 'error');
+        }
+    }
+}
+
+let lolipopModelsKey = '';
+let lolipopModelsRequest = 0;
+
+function resetLolipopModels(message = 'APIキーを入力してモデル一覧を取得') {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = message;
+    elements.lolipopModelSelect.replaceChildren(option);
+    elements.lolipopModelSelect.disabled = true;
+    lolipopModelsKey = '';
+}
+
+async function loadLolipopModels(apiKey, savedModel) {
+    const request = ++lolipopModelsRequest;
+    resetLolipopModels(apiKey ? '読み込み中...' : undefined);
+    if (!apiKey) return false;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+        const response = await fetch('https://ai-gateway.lolipop.jp/v1/models', {
+            headers: { 'Authorization': `Bearer ${apiKey}` }, signal: controller.signal
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            const code = data?.error?.code;
+            throw new Error(`${data?.error?.message || data?.message || `HTTP ${response.status}`}${code ? ` (${code})` : ''}`);
+        }
+        const data = await response.json();
+        const models = Array.isArray(data.data)
+            ? [...new Set(data.data.map(model => model?.id).filter(id => typeof id === 'string' && id.trim()))]
+            : [];
+        if (!models.length) throw new Error('利用可能なモデルがありません。Gateway側のモデル許可設定を確認してください');
+        if (request !== lolipopModelsRequest) return false;
+        const select = elements.lolipopModelSelect;
+        select.replaceChildren();
+        for (const id of models) {
+            const option = document.createElement('option');
+            option.value = id;
+            option.textContent = id === 'auto' ? 'auto（Gateway側で自動選択）' : id;
+            select.appendChild(option);
+        }
+        select.value = models.includes(savedModel) ? savedModel : models[0];
+        select.disabled = false;
+        lolipopModelsKey = apiKey;
+        showLolipopKeyStatus(`✅ ${models.length}件のモデルを取得しました`, 'success');
+        return true;
+    } catch (error) {
+        if (request !== lolipopModelsRequest) return false;
+        resetLolipopModels('モデル一覧を再取得してください');
+        showLolipopKeyStatus(`⚠️ モデル取得失敗: ${error.name === 'AbortError' ? '接続がタイムアウトしました' : error.message}`, 'error');
+        return false;
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
@@ -627,7 +1171,7 @@ async function checkTranslationState() {
 
         const response = await chrome.tabs.sendMessage(tab.id, {
             type: 'GET_TRANSLATION_STATE'
-        }).catch(() => null);
+        }, { frameId: 0 }).catch(() => null);
 
         if (response) {
             if (response.isTranslated) {
@@ -661,16 +1205,36 @@ function setupEventListeners() {
         } else if (provider === 'sambanova') {
             const saved = await settingsStorage.get(['sambanovaModel']);
             await loadSambaNovaModels(saved.sambanovaModel);
+        } else if (provider === 'nvidia') {
+            const saved = await settingsStorage.get(['nvidiaModel']);
+            await loadNvidiaModels(saved.nvidiaModel);
+        } else if (provider === 'cerebras') {
+            const saved = await settingsStorage.get(['cerebrasModel']);
+            await loadCerebrasModels(saved.cerebrasModel);
+        } else if (provider === 'plamo') {
+            const saved = await settingsStorage.get(['plamoModel']);
+            await loadPlaMoModels(saved.plamoModel);
+        } else if (provider === 'opencodego') {
+            const saved = await settingsStorage.get(['opencodeGoModel']);
+            await loadOpenCodeGoModels(saved.opencodeGoModel);
+        } else if (provider === 'lolipop') {
+            const saved = await settingsStorage.get(['lolipopModel']);
+            await loadLolipopModels(elements.lolipopApiKey.value.trim(), saved.lolipopModel);
         } else if (provider === 'lmstudio') {
             const saved = await settingsStorage.get(['lmstudioModel']);
             await loadLMStudioModels(saved.lmstudioModel);
         }
 
         // 翻訳ボタンの有効/無効を再評価
-        const result = await settingsStorage.get(['apiKey', 'openrouterApiKey', 'sambanovaApiKey', 'lmstudioEndpoint']);
+        const result = await settingsStorage.get(['apiKey', 'openrouterApiKey', 'sambanovaApiKey', 'nvidiaApiKey', 'cerebrasApiKey', 'plamoApiKey', 'opencodeGoApiKey', 'lolipopApiKey', 'lolipopModel', 'lmstudioEndpoint']);
         let activeKey;
         if (provider === 'openrouter') activeKey = result.openrouterApiKey;
         else if (provider === 'sambanova') activeKey = result.sambanovaApiKey;
+        else if (provider === 'nvidia') activeKey = result.nvidiaApiKey;
+        else if (provider === 'cerebras') activeKey = result.cerebrasApiKey;
+        else if (provider === 'plamo') activeKey = result.plamoApiKey;
+        else if (provider === 'opencodego') activeKey = result.opencodeGoApiKey;
+        else if (provider === 'lolipop') activeKey = result.lolipopApiKey && result.lolipopModel;
         else if (provider === 'lmstudio') activeKey = result.lmstudioEndpoint || elements.lmstudioEndpoint.value;
         else activeKey = result.apiKey;
         elements.translateBtn.disabled = !activeKey;
@@ -682,7 +1246,7 @@ function setupEventListeners() {
         await loadGeminiModels(saved.apiKey, saved.model);
     });
 
-    // LM Studio モデル一覧の再取得
+    // ローカルAPI モデル一覧の再取得
     elements.lmstudioRefresh.addEventListener('click', async () => {
         const btn = elements.lmstudioRefresh;
         btn.disabled = true;
@@ -697,10 +1261,24 @@ function setupEventListeners() {
         }
     });
 
-    // LM Studio エンドポイント変更時はモデル一覧を再取得
+    // ローカルAPI エンドポイント変更時はモデル一覧を再取得
     elements.lmstudioEndpoint.addEventListener('change', async () => {
         const saved = await settingsStorage.get(['lmstudioModel']);
         await loadLMStudioModels(saved.lmstudioModel);
+    });
+
+    elements.contextParallelism.addEventListener('change', async () => {
+        try { await settingsStorage.set({ contextParallelism: normalizeContextParallelism(elements.contextParallelism.value) }); }
+        catch (error) { showStatus('並列数を保存できませんでした', 'error'); }
+    });
+    elements.contextAwareParallel.addEventListener('change', async () => {
+        try { await settingsStorage.set({ contextAwareParallel: elements.contextAwareParallel.checked }); }
+        catch (error) { elements.contextAwareParallel.checked = !elements.contextAwareParallel.checked; showStatus('設定を保存できませんでした', 'error'); }
+        elements.contextParallelism.disabled = !elements.contextAwareParallel.checked;
+    });
+
+    elements.batchSize.addEventListener('change', async () => {
+        await settingsStorage.set({ batchMaxChars: parseInt(elements.batchSize.value, 10) });
     });
 
     // APIキーの表示/非表示（Gemini）
@@ -723,6 +1301,27 @@ function setupEventListeners() {
         elements.toggleSambanovaIcon.textContent = isPassword ? '🔒' : '👁';
     });
 
+    elements.toggleNvidiaKey.addEventListener('click', () => {
+        const isPassword = elements.nvidiaApiKey.type === 'password';
+        elements.nvidiaApiKey.type = isPassword ? 'text' : 'password';
+        elements.toggleNvidiaIcon.textContent = isPassword ? '🔒' : '👁';
+    });
+    elements.toggleCerebrasKey.addEventListener('click', () => {
+        const isPassword = elements.cerebrasApiKey.type === 'password';
+        elements.cerebrasApiKey.type = isPassword ? 'text' : 'password';
+        elements.toggleCerebrasIcon.textContent = isPassword ? '🔒' : '👁';
+    });
+    elements.togglePlamoKey.addEventListener('click', () => {
+        const isPassword = elements.plamoApiKey.type === 'password';
+        elements.plamoApiKey.type = isPassword ? 'text' : 'password';
+        elements.togglePlamoIcon.textContent = isPassword ? '🔒' : '👁';
+    });
+    elements.toggleOpencodeGoKey.addEventListener('click', () => {
+        const isPassword = elements.opencodeGoApiKey.type === 'password';
+        elements.opencodeGoApiKey.type = isPassword ? 'text' : 'password';
+        elements.toggleOpencodeGoIcon.textContent = isPassword ? '🔒' : '👁';
+    });
+
     elements.sambanovaRefresh.addEventListener('click', async () => {
         const btn = elements.sambanovaRefresh;
         btn.disabled = true;
@@ -737,7 +1336,79 @@ function setupEventListeners() {
         }
     });
 
+    elements.nvidiaRefresh.addEventListener('click', async () => {
+        const btn = elements.nvidiaRefresh;
+        btn.disabled = true;
+        const originalText = btn.querySelector('.btn-text').textContent;
+        btn.querySelector('.btn-text').textContent = '⏳ 取得中...';
+        try {
+            const saved = await settingsStorage.get(['nvidiaModel']);
+            await loadNvidiaModels(saved.nvidiaModel);
+        } finally {
+            btn.querySelector('.btn-text').textContent = originalText;
+            btn.disabled = false;
+        }
+    });
+    elements.cerebrasRefresh.addEventListener('click', async () => {
+        const btn = elements.cerebrasRefresh;
+        btn.disabled = true;
+        const originalText = btn.querySelector('.btn-text').textContent;
+        btn.querySelector('.btn-text').textContent = '⏳ 取得中...';
+        try {
+            const saved = await settingsStorage.get(['cerebrasModel']);
+            await loadCerebrasModels(saved.cerebrasModel);
+        } finally {
+            btn.querySelector('.btn-text').textContent = originalText;
+            btn.disabled = false;
+        }
+    });
+    elements.plamoRefresh.addEventListener('click', async () => {
+        const btn = elements.plamoRefresh;
+        btn.disabled = true;
+        const originalText = btn.querySelector('.btn-text').textContent;
+        btn.querySelector('.btn-text').textContent = '⏳ 取得中...';
+        try {
+            const saved = await settingsStorage.get(['plamoModel']);
+            await loadPlaMoModels(saved.plamoModel);
+        } finally {
+            btn.querySelector('.btn-text').textContent = originalText;
+            btn.disabled = false;
+        }
+    });
+    elements.opencodeGoRefresh.addEventListener('click', async () => {
+        const btn = elements.opencodeGoRefresh;
+        btn.disabled = true;
+        const originalText = btn.querySelector('.btn-text').textContent;
+        btn.querySelector('.btn-text').textContent = '⏳ 取得中...';
+        try {
+            const saved = await settingsStorage.get(['opencodeGoModel']);
+            await loadOpenCodeGoModels(saved.opencodeGoModel);
+        } finally {
+            btn.querySelector('.btn-text').textContent = originalText;
+            btn.disabled = false;
+        }
+    });
+
     elements.openrouterModelSelect.addEventListener('change', syncOpenRouterModelTitle);
+    elements.toggleLolipopKey.addEventListener('click', () => {
+        const isPassword = elements.lolipopApiKey.type === 'password';
+        elements.lolipopApiKey.type = isPassword ? 'text' : 'password';
+        elements.toggleLolipopIcon.textContent = isPassword ? '🔒' : '👁';
+    });
+    elements.lolipopApiKey.addEventListener('input', () => {
+        ++lolipopModelsRequest;
+        resetLolipopModels();
+        if (elements.apiProvider.value === 'lolipop') elements.translateBtn.disabled = true;
+    });
+    elements.lolipopRefresh.addEventListener('click', async () => {
+        const button = elements.lolipopRefresh;
+        button.disabled = true;
+        try {
+            await loadLolipopModels(elements.lolipopApiKey.value.trim(), elements.lolipopModelSelect.value);
+        } finally {
+            button.disabled = false;
+        }
+    });
 
     // 設定保存
     elements.saveSettings.addEventListener('click', saveSettings);
@@ -750,6 +1421,18 @@ function setupEventListeners() {
 
     // キャンセルボタン
     elements.cancelBtn.addEventListener('click', cancelTranslation);
+
+    // 表示設定はAPIキー検証と独立して即時保存する。
+    for (const key of ['translationUnderline', 'originalTooltip']) {
+        elements[key].addEventListener('change', async () => {
+            try {
+                await settingsStorage.set({ [key]: elements[key].checked });
+            } catch (error) {
+                elements[key].checked = !elements[key].checked;
+                showStatus('表示設定を保存できませんでした。もう一度お試しください。', 'error');
+            }
+        });
+    }
 
     // 自動翻訳トグル
     elements.autoTranslate.addEventListener('change', async () => {
@@ -807,7 +1490,7 @@ function setupEventListeners() {
     // Content / 拡張からの進捗メッセージを受信
     chrome.runtime.onMessage.addListener((message) => {
         if (message.type === 'TRANSLATION_PROGRESS') {
-            updateProgress(message.current, message.total);
+            updateProgress(message.current, message.total, message.phase);
         }
         if (message.type === 'TRANSLATION_COMPLETE') {
             onTranslationComplete();
@@ -835,6 +1518,11 @@ async function saveSettings() {
     const apiKey = elements.apiKey.value.trim();
     const openrouterApiKey = elements.openrouterApiKey.value.trim();
     const sambanovaApiKey = elements.sambanovaApiKey.value.trim();
+    const nvidiaApiKey = elements.nvidiaApiKey.value.trim();
+    const cerebrasApiKey = elements.cerebrasApiKey.value.trim();
+    const plamoApiKey = elements.plamoApiKey.value.trim();
+    const opencodeGoApiKey = elements.opencodeGoApiKey.value.trim();
+    const lolipopApiKey = elements.lolipopApiKey.value.trim();
     const lmstudioEndpoint = (elements.lmstudioEndpoint.value || 'http://localhost:1234').trim();
     const lmstudioModel = elements.lmstudioModelSelect.value;
     const lmstudioSourceLang = elements.lmstudioSourceLang.value;
@@ -842,6 +1530,11 @@ async function saveSettings() {
     const model = elements.modelSelect.value;
     const openrouterModel = elements.openrouterModelSelect.value;
     const sambanovaModel = elements.sambanovaModelSelect.value;
+    const nvidiaModel = elements.nvidiaModelSelect.value;
+    const cerebrasModel = elements.cerebrasModelSelect.value;
+    const plamoModel = elements.plamoModelSelect.value;
+    const opencodeGoModel = elements.opencodeGoModelSelect.value;
+    let lolipopModel = elements.lolipopModelSelect.value;
     const batchMaxChars = parseInt(elements.batchSize.value, 10);
 
     let activeKey, showKeyStatusFn, activeModel;
@@ -853,6 +1546,26 @@ async function saveSettings() {
         activeKey = sambanovaApiKey;
         activeModel = sambanovaModel;
         showKeyStatusFn = (msg, type) => showSambanovaKeyStatus(msg, type);
+    } else if (provider === 'nvidia') {
+        activeKey = nvidiaApiKey;
+        activeModel = nvidiaModel;
+        showKeyStatusFn = (msg, type) => showNvidiaKeyStatus(msg, type);
+    } else if (provider === 'cerebras') {
+        activeKey = cerebrasApiKey;
+        activeModel = cerebrasModel;
+        showKeyStatusFn = (msg, type) => showCerebrasKeyStatus(msg, type);
+    } else if (provider === 'plamo') {
+        activeKey = plamoApiKey;
+        activeModel = plamoModel;
+        showKeyStatusFn = (msg, type) => showPlaMoKeyStatus(msg, type);
+    } else if (provider === 'opencodego') {
+        activeKey = opencodeGoApiKey;
+        activeModel = opencodeGoModel;
+        showKeyStatusFn = (msg, type) => showOpenCodeGoKeyStatus(msg, type);
+    } else if (provider === 'lolipop') {
+        activeKey = lolipopApiKey;
+        activeModel = lolipopModel;
+        showKeyStatusFn = showLolipopKeyStatus;
     } else if (provider === 'lmstudio') {
         activeKey = lmstudioEndpoint;
         activeModel = lmstudioModel;
@@ -869,16 +1582,36 @@ async function saveSettings() {
         return;
     }
 
+    const googleTranslateApiKey = elements.googleTranslateApiKey.value.trim();
+    const googlePreviewEnabled = elements.googlePreviewEnabled.checked;
+    if (googlePreviewEnabled && !googleTranslateApiKey) {
+        showStatus('Googleで仮翻訳するにはGoogle Cloud TranslationのAPIキーを入力してください', 'error');
+        elements.googleTranslateApiKey.focus();
+        return;
+    }
+    if (provider === 'lolipop') {
+        // 未取得のキーでは、保存前に許可モデルを取得する。初回は保存ボタンだけでも設定できる。
+        if (lolipopModelsKey !== lolipopApiKey || elements.lolipopModelSelect.disabled) {
+            if (!await loadLolipopModels(lolipopApiKey, lolipopModel)) return;
+        }
+        lolipopModel = elements.lolipopModelSelect.value;
+        activeModel = lolipopModel;
+    }
+    if (!lolipopModel) {
+        const saved = await settingsStorage.get(['lolipopModel']);
+        lolipopModel = saved.lolipopModel || '';
+    }
     const saveBtn = elements.saveSettings;
     const originalText = saveBtn.querySelector('.btn-text').textContent;
     saveBtn.querySelector('.btn-text').textContent = '⏳ 検証中...';
     saveBtn.disabled = true;
 
     await settingsStorage.set({
-        apiKey, openrouterApiKey, sambanovaApiKey, apiProvider: provider,
-        targetLang, model, openrouterModel, sambanovaModel,
+        googlePreviewEnabled, googleTranslateApiKey,
+        apiKey, openrouterApiKey, sambanovaApiKey, nvidiaApiKey, cerebrasApiKey, plamoApiKey, opencodeGoApiKey, lolipopApiKey, apiProvider: provider,
+        targetLang, model, openrouterModel, sambanovaModel, nvidiaModel, cerebrasModel, plamoModel, opencodeGoModel, lolipopModel,
         lmstudioEndpoint, lmstudioModel, lmstudioSourceLang,
-        batchMaxChars
+        batchMaxChars, contextAwareParallel: elements.contextAwareParallel.checked, contextParallelism: normalizeContextParallelism(elements.contextParallelism.value)
     });
     elements.translateBtn.disabled = false;
 
@@ -891,7 +1624,7 @@ async function saveSettings() {
         });
 
         if (response.success && response.isValid) {
-            const label = provider === 'lmstudio' ? '✅ LM Studio に接続できました。設定を保存しました。' : '✅ APIキーが有効です。設定を保存しました。';
+            const label = provider === 'lmstudio' ? '✅ ローカルAPIに接続できました。設定を保存しました。' : '✅ APIキーが有効です。設定を保存しました。';
             showKeyStatusFn(label, 'success');
         } else {
             const detail = response.error || '接続テストに失敗しました';
@@ -937,11 +1670,11 @@ async function startTranslation() {
             await new Promise(resolve => setTimeout(resolve, 200));
         }
 
-        const settings = await settingsStorage.get(['batchMaxChars']);
         const response = await sendTabMessageWithTimeout(tab.id, {
             type: 'START_TRANSLATION',
             targetLang,
-            batchMaxChars: resolveBatchMaxChars(settings.batchMaxChars)
+            batchMaxChars: resolveBatchMaxChars(parseInt(elements.batchSize.value, 10)),
+            contextAwareParallel: elements.contextAwareParallel.checked, contextParallelism: normalizeContextParallelism(elements.contextParallelism.value)
         });
 
         if (!response?.success) {
@@ -960,7 +1693,7 @@ async function cancelTranslation() {
     if (!tab?.id) return;
 
     try {
-        await chrome.tabs.sendMessage(tab.id, { type: 'CANCEL_TRANSLATION' });
+        await chrome.tabs.sendMessage(tab.id, { type: 'CANCEL_TRANSLATION' }, { frameId: 0 });
         setTranslating(false);
         showStatus('⏹ 翻訳をキャンセルしました', 'info');
     } catch (error) {
@@ -976,7 +1709,7 @@ async function restoreOriginal() {
     if (!tab?.id) return;
 
     try {
-        await chrome.tabs.sendMessage(tab.id, { type: 'RESTORE_ORIGINAL' });
+        await chrome.tabs.sendMessage(tab.id, { type: 'RESTORE_ORIGINAL' }, { frameId: 0 });
         elements.restoreBtn.classList.add('hidden');
         showStatus('原文に戻しました', 'success');
     } catch (error) {
@@ -1007,11 +1740,15 @@ function setTranslating(translating) {
 /**
  * 進捗を更新する
  */
-function updateProgress(current, total) {
+function updateProgress(current, total, phase) {
     const percent = Math.round((current / total) * 100);
     elements.progressFill.style.width = `${percent}%`;
     elements.progressPercent.textContent = `${percent}%`;
-    elements.progressText.textContent = `翻訳中... (${current}/${total})`;
+    if (phase === 'finalizing') {
+        elements.progressText.textContent = `仕上げ中... (${current}/${total})`;
+    } else {
+        elements.progressText.textContent = `翻訳中... (${current}/${total})`;
+    }
 }
 
 /**
@@ -1069,8 +1806,54 @@ function showSambanovaKeyStatus(message, type) {
     }, 5000);
 }
 
+function showNvidiaKeyStatus(message, type) {
+    elements.nvidiaKeyStatus.textContent = message;
+    elements.nvidiaKeyStatus.className = `key-status ${type}`;
+    elements.nvidiaKeyStatus.classList.remove('hidden');
+
+    setTimeout(() => {
+        elements.nvidiaKeyStatus.classList.add('hidden');
+    }, 5000);
+}
+
+function showCerebrasKeyStatus(message, type) {
+    elements.cerebrasKeyStatus.textContent = message;
+    elements.cerebrasKeyStatus.className = `key-status ${type}`;
+    elements.cerebrasKeyStatus.classList.remove('hidden');
+
+    setTimeout(() => {
+        elements.cerebrasKeyStatus.classList.add('hidden');
+    }, 5000);
+}
+
+function showPlaMoKeyStatus(message, type) {
+    elements.plamoKeyStatus.textContent = message;
+    elements.plamoKeyStatus.className = `key-status ${type}`;
+    elements.plamoKeyStatus.classList.remove('hidden');
+
+    setTimeout(() => {
+        elements.plamoKeyStatus.classList.add('hidden');
+    }, 5000);
+}
+
+function showLolipopKeyStatus(message, type) {
+    elements.lolipopKeyStatus.textContent = message;
+    elements.lolipopKeyStatus.className = `key-status ${type}`;
+    elements.lolipopKeyStatus.classList.remove('hidden');
+}
+
+function showOpenCodeGoKeyStatus(message, type) {
+    elements.opencodeGoKeyStatus.textContent = message;
+    elements.opencodeGoKeyStatus.className = `key-status ${type}`;
+    elements.opencodeGoKeyStatus.classList.remove('hidden');
+
+    setTimeout(() => {
+        elements.opencodeGoKeyStatus.classList.add('hidden');
+    }, 5000);
+}
+
 /**
- * LM Studio 接続ステータスを表示
+ * ローカルAPI 接続ステータスを表示
  */
 function showLMStudioKeyStatus(message, type) {
     elements.lmstudioKeyStatus.textContent = message;
@@ -1248,7 +2031,7 @@ function renderCacheSites(sites) {
         row.className = 'cache-site-row';
         row.innerHTML = `
             <span class="cache-site-host" title="${site.host}">${site.host}</span>
-            <span class="cache-site-stats">${site.count}件 (${sizeKB}KB)</span>
+            <span class="cache-site-stats">${site.count}件 (${sizeKB}KiB / ${((site.maxBytes || 20 * 1024 * 1024) / 1024 / 1024).toFixed(0)}MiB)</span>
             <button class="btn btn-danger btn-xs cache-site-delete" data-host="${site.host}">
                 <span class="btn-text">削除</span>
             </button>
@@ -1405,5 +2188,5 @@ function sendRuntimeMessageWithTimeout(message, timeoutMs = MESSAGE_TIMEOUT_MS) 
 }
 
 function sendTabMessageWithTimeout(tabId, message, timeoutMs = MESSAGE_TIMEOUT_MS) {
-    return withTimeout(chrome.tabs.sendMessage(tabId, message), timeoutMs, 'ページとの通信');
+    return withTimeout(chrome.tabs.sendMessage(tabId, message, { frameId: 0 }), timeoutMs, 'ページとの通信');
 }

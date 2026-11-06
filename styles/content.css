@@ -3,14 +3,10 @@
    翻訳されたテキストのスタイル
    =================================== */
 
-/* 翻訳済みテキストのハイライト */
-.llm-translated {
-    border-bottom: 1px dashed rgba(0, 54, 114, 0.4);
-    transition: border-color 0.2s ease;
-}
-
-.llm-translated:hover {
-    border-bottom-color: rgba(0, 54, 114, 0.8);
+/* テキスト範囲だけを装飾する。親子要素の下線や罫線を重ねない。 */
+::highlight(gemitrans-translated) {
+    text-decoration: underline dashed currentColor;
+    text-decoration-thickness: 1px;
 }
 
 /* JS制御のツールチップ（position: fixed でクリッピング問題を回避） */

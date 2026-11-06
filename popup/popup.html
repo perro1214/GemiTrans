@@ -11,13 +11,71 @@
     <!-- ヘッダー -->
     <header class="header">
       <div class="logo">
-        <img src="../icons/icon48.png" alt="icon" class="logo-icon">
+        <img src="../icons/icon48.png" alt="" class="logo-icon">
         <div>
           <h1 class="title">AI Translator</h1>
-          <p class="subtitle">Powered by Multi-LLM</p>
+          <p class="subtitle">ページを、いつもの言語で。</p>
         </div>
       </div>
     </header>
+
+    <!-- 翻訳セクション -->
+    <section class="section" id="translate-section">
+
+      <button id="translate-btn" class="btn btn-primary" disabled>
+        <span class="btn-text">✨ ページを翻訳</span>
+      </button>
+
+      <button id="cancel-btn" class="btn btn-danger hidden">
+        <span class="btn-text">⏹ キャンセル</span>
+      </button>
+
+      <button id="restore-btn" class="btn btn-warning hidden">
+        <span class="btn-text">↩️ 原文に戻す</span>
+      </button>
+
+      <div class="field toggle-field">
+        <label class="toggle-label" for="auto-translate">
+          <span class="label-icon">⚡</span>
+          <span>ページを開いた時に自動翻訳</span>
+        </label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="auto-translate">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <p class="warning-text">自動翻訳はページごとにAPIを利用します。料金・利用制限にご注意ください。</p>
+
+      <div class="field toggle-field">
+        <label class="toggle-label" for="translation-underline"><span>翻訳した箇所に下線を表示</span></label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="translation-underline" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="field toggle-field">
+        <label class="toggle-label" for="original-tooltip"><span>マウスを重ねると原文を表示</span></label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="original-tooltip" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <p class="warning-text">表示設定はすぐに保存・反映されます。下線OFFでもサイト本来の下線は残ります。</p>
+
+      <!-- 進捗バー -->
+      <div id="progress-container" class="progress-container hidden">
+        <div class="progress-header">
+          <span id="progress-text" class="progress-text">翻訳中...</span>
+          <span id="progress-percent" class="progress-percent">0%</span>
+        </div>
+        <div class="progress-bar">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+      </div>
+
+      <!-- ステータスメッセージ -->
+      <div id="status-message" role="status" aria-live="polite" class="status-message hidden"></div>
+    </section>
 
     <!-- 設定セクション -->
     <section class="section" id="settings-section">
@@ -30,7 +88,12 @@
           <option value="gemini">Google Gemini</option>
           <option value="openrouter">OpenRouter</option>
           <option value="sambanova">SambaNova</option>
-          <option value="lmstudio">LM Studio (ローカル)</option>
+          <option value="nvidia">NVIDIA API</option>
+          <option value="cerebras">Cerebras API</option>
+          <option value="plamo">PlaMo API</option>
+          <option value="opencodego">OpenCode Go</option>
+          <option value="lolipop">ロリポップ！AI Gateway</option>
+          <option value="lmstudio">ローカルAPI (llama.cpp / LM Studio / MLX)</option>
         </select>
       </div>
 
@@ -56,11 +119,11 @@
         <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
       </div>
 
-      <!-- LM Studio エンドポイント -->
+      <!-- ローカルAPI エンドポイント -->
       <div class="field hidden" id="lmstudio-endpoint-field">
         <label class="label" for="lmstudio-endpoint">
           <span class="label-icon">🖥️</span>
-          LM Studio エンドポイント
+          ローカルAPI エンドポイント
         </label>
         <div class="input-group">
           <input
@@ -74,7 +137,7 @@
         </div>
         <div id="lmstudio-key-status" class="key-status hidden"></div>
         <p class="hint-text">
-          <code>lms server start</code> でローカルサーバーを起動し、TranslateGemma モデルをロードしてください。
+          llama.cpp / LM Studio / mlx-lm の OpenAI互換サーバーを指定できます。GTX 1080 の Gemma 4 サーバーは <code>http://192.168.11.20:8080</code> です。
         </p>
       </div>
 
@@ -122,6 +185,110 @@
         <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
       </div>
 
+      <!-- NVIDIA APIキー -->
+      <div class="field hidden" id="nvidia-key-field">
+        <label class="label" for="nvidia-api-key">
+          <span class="label-icon">🔑</span>
+          NVIDIA API Key
+        </label>
+        <div class="input-group">
+          <input
+            type="password"
+            id="nvidia-api-key"
+            class="input"
+            placeholder="NVIDIA API キーを入力..."
+            autocomplete="off"
+          >
+          <button id="toggle-nvidia-key" class="btn-icon" title="表示/非表示">
+            <span id="toggle-nvidia-icon">👁</span>
+          </button>
+        </div>
+        <div id="nvidia-key-status" class="key-status hidden"></div>
+        <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
+      </div>
+
+      <!-- Cerebras APIキー -->
+      <div class="field hidden" id="cerebras-key-field">
+        <label class="label" for="cerebras-api-key">
+          <span class="label-icon">🔑</span>
+          Cerebras API Key
+        </label>
+        <div class="input-group">
+          <input
+            type="password"
+            id="cerebras-api-key"
+            class="input"
+            placeholder="Cerebras API キーを入力..."
+            autocomplete="off"
+          >
+          <button id="toggle-cerebras-key" class="btn-icon" title="表示/非表示">
+            <span id="toggle-cerebras-icon">👁</span>
+          </button>
+        </div>
+        <div id="cerebras-key-status" class="key-status hidden"></div>
+        <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
+      </div>
+
+      <!-- PlaMo APIキー -->
+      <div class="field hidden" id="plamo-key-field">
+        <label class="label" for="plamo-api-key">
+          <span class="label-icon">🔑</span>
+          PlaMo API Key
+        </label>
+        <div class="input-group">
+          <input
+            type="password"
+            id="plamo-api-key"
+            class="input"
+            placeholder="PlaMo API キーを入力..."
+            autocomplete="off"
+          >
+          <button id="toggle-plamo-key" class="btn-icon" title="表示/非表示">
+            <span id="toggle-plamo-icon">👁</span>
+          </button>
+        </div>
+        <div id="plamo-key-status" class="key-status hidden"></div>
+        <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
+      </div>
+
+      <!-- OpenCode Go APIキー -->
+      <div class="field hidden" id="opencode-go-key-field">
+        <label class="label" for="opencode-go-api-key">
+          <span class="label-icon">🔑</span>
+          OpenCode Go API Key
+        </label>
+        <div class="input-group">
+          <input
+            type="password"
+            id="opencode-go-api-key"
+            class="input"
+            placeholder="OpenCode Go API キーを入力..."
+            autocomplete="off"
+          >
+          <button id="toggle-opencode-go-key" class="btn-icon" title="表示/非表示">
+            <span id="toggle-opencode-go-icon">👁</span>
+          </button>
+        </div>
+        <div id="opencode-go-key-status" class="key-status hidden"></div>
+        <p class="warning-text">⚠️ APIキーはブラウザのローカルストレージに平文で保存されます。共有端末ではご注意ください。</p>
+      </div>
+
+      <!-- ロリポップ！AI Gateway APIキー -->
+      <div class="field hidden" id="lolipop-key-field">
+        <label class="label" for="lolipop-api-key">
+          <span class="label-icon">🔑</span>
+          ロリポップ！AI Gateway API Key
+        </label>
+        <div class="input-group">
+          <input type="password" id="lolipop-api-key" class="input"
+            placeholder="AI Gateway API キーを入力..." autocomplete="off">
+          <button id="toggle-lolipop-key" class="btn-icon" title="表示/非表示">
+            <span id="toggle-lolipop-icon">👁</span>
+          </button>
+        </div>
+        <div id="lolipop-key-status" class="key-status hidden"></div>
+      </div>
+
       <div class="field">
         <label class="label" for="target-lang">
           <span class="label-icon">🌐</span>
@@ -138,6 +305,34 @@
           <option value="Português">🇧🇷 Português</option>
           <option value="Italiano">🇮🇹 Italiano</option>
           <option value="Русский">🇷🇺 Русский</option>
+          <option value="Türkçe">🇹🇷 Türkçe</option>
+          <option value="العربية">🇸🇦 العربية</option>
+          <option value="ไทย">🇹🇭 ไทย</option>
+          <option value="Tiếng Việt">🇻🇳 Tiếng Việt</option>
+          <option value="Bahasa Melayu">🇲🇾 Bahasa Melayu</option>
+          <option value="Bahasa Indonesia">🇮🇩 Bahasa Indonesia</option>
+          <option value="Filipino">🇵🇭 Filipino</option>
+          <option value="हिन्दी">🇮🇳 हिन्दी</option>
+          <option value="繁體中文">🇹🇼 繁體中文</option>
+          <option value="Polski">🇵🇱 Polski</option>
+          <option value="Čeština">🇨🇿 Čeština</option>
+          <option value="Nederlands">🇳🇱 Nederlands</option>
+          <option value="Khmer">🇰🇭 Khmer</option>
+          <option value="မြန်မာ">🇲🇲 မြန်မာ</option>
+          <option value="فارسی">🇮🇷 فارسی</option>
+          <option value="ગુજરાતી">🇮🇳 ગુજરાતી</option>
+          <option value="اردو">🇵🇰 اردو</option>
+          <option value="తెలుగు">🇮🇳 తెలుగు</option>
+          <option value="मराठी">🇮🇳 मराठी</option>
+          <option value="עברית">🇮🇱 עברית</option>
+          <option value="বাংলা">🇧🇩 বাংলা</option>
+          <option value="தமிழ்">🇮🇳 தமிழ்</option>
+          <option value="Українська">🇺🇦 Українська</option>
+          <option value="Tibetan">Tibetan</option>
+          <option value="Kazakh">🇰🇿 Kazakh</option>
+          <option value="Mongolian">🇲🇳 Mongolian</option>
+          <option value="Uyghur">Uyghur</option>
+          <option value="Cantonese">🇭🇰 Cantonese</option>
         </select>
       </div>
 
@@ -154,25 +349,25 @@
           <option value="gemini-2.5-pro-preview-05-06">Gemini 2.5 Pro（高精度）</option>
         </select>
         <button id="gemini-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
-          <span class="btn-text">🔄 APIキーでモデル一覧を取得</span>
+          <span class="btn-text">🔄 モデル一覧を更新</span>
         </button>
       </div>
 
-      <!-- LM Studio モデル選択 -->
+      <!-- ローカルAPI モデル選択 -->
       <div class="field hidden" id="lmstudio-model-field">
         <label class="label" for="lmstudio-model-select">
           <span class="label-icon">🤖</span>
           モデル
         </label>
         <select id="lmstudio-model-select" class="select">
-          <option value="translategemma-4b-it">TranslateGemma 4B (読み込み中…)</option>
+          <option value="mlx-community/Hy-MT2-1.8B-4bit">Hy-MT2 1.8B 4bit (読み込み中…)</option>
         </select>
         <button id="lmstudio-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
-          <span class="btn-text">🔄 LM Studio からモデル一覧を再取得</span>
+          <span class="btn-text">🔄 ローカルAPIからモデル一覧を再取得</span>
         </button>
       </div>
 
-      <!-- LM Studio ソース言語 -->
+      <!-- ローカルAPI ソース言語 -->
       <div class="field hidden" id="lmstudio-source-lang-field">
         <label class="label" for="lmstudio-source-lang">
           <span class="label-icon">🔤</span>
@@ -182,6 +377,7 @@
           <option value="en">English (en)</option>
           <option value="ja">Japanese (ja)</option>
           <option value="zh">Chinese (zh)</option>
+          <option value="zh-hant">Traditional Chinese (zh-hant)</option>
           <option value="ko">Korean (ko)</option>
           <option value="fr">French (fr)</option>
           <option value="de">German (de)</option>
@@ -194,6 +390,8 @@
           <option value="vi">Vietnamese (vi)</option>
           <option value="th">Thai (th)</option>
           <option value="id">Indonesian (id)</option>
+          <option value="ms">Malay (ms)</option>
+          <option value="tl">Filipino (tl)</option>
           <option value="tr">Turkish (tr)</option>
           <option value="nl">Dutch (nl)</option>
           <option value="pl">Polish (pl)</option>
@@ -201,6 +399,21 @@
           <option value="cs">Czech (cs)</option>
           <option value="el">Greek (el)</option>
           <option value="he">Hebrew (he)</option>
+          <option value="bn">Bengali (bn)</option>
+          <option value="gu">Gujarati (gu)</option>
+          <option value="te">Telugu (te)</option>
+          <option value="mr">Marathi (mr)</option>
+          <option value="ta">Tamil (ta)</option>
+          <option value="ur">Urdu (ur)</option>
+          <option value="fa">Persian (fa)</option>
+          <option value="km">Khmer (km)</option>
+          <option value="my">Burmese (my)</option>
+          <option value="uk">Ukrainian (uk)</option>
+          <option value="bo">Tibetan (bo)</option>
+          <option value="kk">Kazakh (kk)</option>
+          <option value="mn">Mongolian (mn)</option>
+          <option value="ug">Uyghur (ug)</option>
+          <option value="yue">Cantonese (yue)</option>
         </select>
       </div>
 
@@ -258,24 +471,147 @@
         </button>
       </div>
 
+      <!-- NVIDIA モデル選択 -->
+      <div class="field hidden" id="nvidia-model-field">
+        <label class="label" for="nvidia-model-select">
+          <span class="label-icon">🤖</span>
+          モデル
+        </label>
+        <select id="nvidia-model-select" class="select">
+          <option value="meta/llama-3.1-70b-instruct">meta/llama-3.1-70b-instruct</option>
+          <option value="meta/llama-3.1-8b-instruct">meta/llama-3.1-8b-instruct</option>
+          <option value="nvidia/llama-3.1-nemotron-70b-instruct">nvidia/llama-3.1-nemotron-70b-instruct</option>
+        </select>
+        <button id="nvidia-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
+          <span class="btn-text">🔄 APIでモデル一覧を取得</span>
+        </button>
+      </div>
+
+      <!-- Cerebras モデル選択 -->
+      <div class="field hidden" id="cerebras-model-field">
+        <label class="label" for="cerebras-model-select">
+          <span class="label-icon">🤖</span>
+          モデル
+        </label>
+        <select id="cerebras-model-select" class="select">
+          <option value="llama-3.3-70b">llama-3.3-70b</option>
+          <option value="llama-3.1-8b">llama-3.1-8b</option>
+          <option value="qwen-3-32b">qwen-3-32b</option>
+        </select>
+        <button id="cerebras-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
+          <span class="btn-text">🔄 APIでモデル一覧を取得</span>
+        </button>
+      </div>
+
+      <!-- PlaMo モデル選択 -->
+      <div class="field hidden" id="plamo-model-field">
+        <label class="label" for="plamo-model-select">
+          <span class="label-icon">🤖</span>
+          モデル
+        </label>
+        <select id="plamo-model-select" class="select">
+          <option value="plamo-2.0-prime">plamo-2.0-prime</option>
+        </select>
+        <button id="plamo-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
+          <span class="btn-text">🔄 APIでモデル一覧を取得</span>
+        </button>
+      </div>
+
+      <!-- OpenCode Go モデル選択 -->
+      <div class="field hidden" id="opencode-go-model-field">
+        <label class="label" for="opencode-go-model-select">
+          <span class="label-icon">🤖</span>
+          モデル
+        </label>
+        <select id="opencode-go-model-select" class="select">
+          <option value="qwen3.5-plus">Qwen3.5 Plus（推奨）</option>
+          <option value="qwen3.6-plus">Qwen3.6 Plus</option>
+          <option value="kimi-k2.6">Kimi K2.6</option>
+          <option value="kimi-k2.5">Kimi K2.5</option>
+          <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+          <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+          <option value="glm-5">GLM-5</option>
+          <option value="glm-5.1">GLM-5.1</option>
+          <option value="mimo-v2.5">MiMo-V2.5</option>
+          <option value="mimo-v2.5-pro">MiMo-V2.5-Pro</option>
+          <option value="minimax-m2.7">MiniMax M2.7</option>
+          <option value="minimax-m2.5">MiniMax M2.5</option>
+        </select>
+        <button id="opencode-go-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
+          <span class="btn-text">🔄 APIでモデル一覧を取得</span>
+        </button>
+      </div>
+
+      <div class="field hidden" id="lolipop-model-field">
+        <label class="label" for="lolipop-model-select">
+          <span class="label-icon">🤖</span>
+          モデル
+        </label>
+        <select id="lolipop-model-select" class="select" disabled>
+          <option value="">APIキーを入力してモデル一覧を取得</option>
+        </select>
+        <button id="lolipop-refresh" class="btn btn-secondary btn-sm" style="margin-top: 6px;">
+          <span class="btn-text">🔄 APIでモデル一覧を取得</span>
+        </button>
+        <p class="hint-text">このAPIキーで許可されたモデルを取得します。autoがある場合はGateway側で自動選択できます。</p>
+      </div>
+
       <div class="field">
         <label class="label" for="batch-size">
           <span class="label-icon">📦</span>
           バッチ許容量
         </label>
         <select id="batch-size" class="select">
-          <option value="1500">小（1500文字）— 安定重視</option>
+          <option value="1500">小（1500文字）— Gemma 4 / ローカル推奨</option>
           <option value="3000" selected>中（3000文字）— バランス</option>
-          <option value="8000">大（8000文字）— 高速</option>
-          <option value="20000">特大（20000文字）— 大容量プラン向け</option>
-          <option value="0">無制限 — 最大プラン向け</option>
+          <option value="8000">大（8000文字）— クラウド/API高速向け</option>
+          <option value="20000">特大（20000文字）— 大容量API向け</option>
+          <option value="0">無制限 — 検証用</option>
         </select>
+      </div>
+
+      <div class="field toggle-field">
+        <label class="toggle-label" for="context-aware-parallel">文脈を保って並列翻訳</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="context-aware-parallel" aria-describedby="context-parallel-hint">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <p id="context-parallel-hint" class="hint-text" style="margin-bottom:12px">ON：セル・表の行・段落の区切りを優先し、見出しと周辺文を添えて下の並列数で処理します。参照文の分だけ入力料金が増える場合があります。次回の翻訳から適用。OFF：従来方式。</p>
+
+      <div class="field">
+        <label class="label" for="context-parallelism">文脈付き翻訳の並列数</label>
+        <select id="context-parallelism" class="select" aria-describedby="parallelism-hint">
+          <option value="1">1（順次処理）</option><option value="2">2</option>
+          <option value="3" selected>3（標準）</option><option value="4">4</option>
+          <option value="5">5</option><option value="6">6</option>
+        </select>
+        <p class="hint-text" id="parallelism-hint">ON時・次回のページ翻訳から適用。増やすと待ち時間が短くなる場合がありますが、APIのレート制限で遅くなる場合もあります。</p>
+      </div>
+
+      <div class="field toggle-field">
+        <label class="toggle-label" for="google-preview-enabled">Googleで先に仮翻訳</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="google-preview-enabled" aria-describedby="google-preview-hint">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label class="label" for="google-translate-api-key">Google Cloud Translation APIキー</label>
+        <input type="password" id="google-translate-api-key" class="input" autocomplete="off" placeholder="Cloud Translation APIのキー">
+        <p class="hint-text" id="google-preview-hint">設定を保存すると適用されます。Googleの仮訳を表示し、届いたLLMの訳文に置き換えます。Googleが失敗した場合もLLM翻訳は続行します。</p>
+        <p class="hint-text">Cloud Translation APIの有効化と課金設定が必要です。ON時は原文をGoogleにも送信し、Googleの文字数課金が別途発生します（使用量表示には含みません）。キーはこの端末に保存します。</p>
       </div>
 
       <button id="save-settings" class="btn btn-secondary">
         <span class="btn-text">💾 設定を保存</span>
       </button>
 
+    </section>
+
+    <details class="maintenance">
+      <summary>使用量・キャッシュ・詳細ログ</summary>
+      <div class="section">
       <button id="clear-cache" class="btn btn-warning btn-sm">
         <span class="btn-text">🗑 全キャッシュをクリア</span>
       </button>
@@ -290,18 +626,6 @@
       </div>
 
       <div class="field toggle-field">
-        <label class="toggle-label" for="auto-translate">
-          <span class="label-icon">⚡</span>
-          <span>ページを開いた時に自動翻訳</span>
-        </label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="auto-translate">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-      <p class="warning-text">⚠️ 自動翻訳を有効にすると、ページを開くたびにAPIが呼び出され、コストが発生します。レート制限にもご注意ください。</p>
-
-      <div class="field toggle-field">
         <label class="toggle-label" for="verbose-log">
           <span class="label-icon">🔍</span>
           <span>詳細ログ（verbose）</span>
@@ -311,39 +635,7 @@
           <span class="toggle-slider"></span>
         </label>
       </div>
-    </section>
-
-    <!-- 翻訳セクション -->
-    <section class="section" id="translate-section">
-      <div class="divider"></div>
-
-      <button id="translate-btn" class="btn btn-primary" disabled>
-        <span class="btn-text">✨ ページを翻訳</span>
-      </button>
-
-      <button id="cancel-btn" class="btn btn-danger hidden">
-        <span class="btn-text">⏹ キャンセル</span>
-      </button>
-
-      <button id="restore-btn" class="btn btn-warning hidden">
-        <span class="btn-text">↩️ 原文に戻す</span>
-      </button>
-
-      <!-- 進捗バー -->
-      <div id="progress-container" class="progress-container hidden">
-        <div class="progress-header">
-          <span id="progress-text" class="progress-text">翻訳中...</span>
-          <span id="progress-percent" class="progress-percent">0%</span>
-        </div>
-        <div class="progress-bar">
-          <div id="progress-fill" class="progress-fill"></div>
-        </div>
       </div>
-
-      <!-- ステータスメッセージ -->
-      <div id="status-message" class="status-message hidden"></div>
-    </section>
-
     <!-- 使用量セクション -->
     <section class="section" id="usage-section">
       <div class="divider"></div>
@@ -395,6 +687,8 @@
         </div>
       </div>
     </section>
+
+    </details>
 
     <!-- フッター -->
     <footer class="footer">
